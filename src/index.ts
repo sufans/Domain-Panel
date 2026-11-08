@@ -15,6 +15,9 @@ import type { WebhookType } from "./cron";
 import { computeDnsState } from "./dns-provider";
 import type { DnsState } from "./dns-provider";
 import { toASCII } from "./punycode";
+import "./platforms";
+import { getPlatformAdapter, getPlatformDefinition, listPlatformDefinitions } from "./platforms";
+import type { PlatformId } from "./platforms";
 
 /**
  * 统一成功响应封装 — 将 payload 扁平化后附加 success: true，
@@ -918,12 +921,16 @@ app.get("/api/accounts", async (c) => {
   }
 });
 
+/** 平台注册表：前端据此生成账号凭证表单和能力提示。 */
+app.get("/api/platforms", (c) => c.json(successRes({ platforms: listPlatformDefinitions() })));
+
 // 2. 绑定新账号（DNSHE：API Key + Secret；Cloudflare：API Token。alias 可选，留空时自动解析）
 app.post("/api/accounts", async (c) => {
   const dbManager = c.get("db");
   try {
     const body = await c.req.json();
-    const provider = body.provider === "cloudflare" ? "cloudflare" : "dnshe";
+    const provider = String(body.provider || "dnshe") as PlatformId;
+    getPlatformDefinition(provider);
     const { alias, api_key, api_secret, api_token } = body;
 
     let newAccount;
@@ -933,15 +940,21 @@ app.post("/api/accounts", async (c) => {
       }
       // 绑定过程会先校验 Token（/user/tokens/verify），无效 Token 直接报错不入库
       newAccount = await dbManager.addAccount(String(alias || "").trim(), "", String(api_token).trim(), "cloudflare");
-    } else {
+    } else if (provider === "dnshe") {
       if (!api_key || !api_secret) {
         return c.json(errorRes("参数缺失：api_key, api_secret 为必填项（alias 可选，留空将自动解析）", "bad_request"), 400);
       }
       newAccount = await dbManager.addAccount(String(alias || "").trim(), String(api_key), String(api_secret));
+    } else if (provider === "dnsneko") {
+      if (!body.username || !api_key) return c.json(errorRes("参数缺失：username, api_key 为必填项", "bad_request"), 400);
+      newAccount = await dbManager.addAccount(String(alias || "").trim(), String(body.username).trim(), String(api_key).trim(), provider);
+    } else {
+      if (!api_key) return c.json(errorRes("参数缺失：api_key 为必填项", "bad_request"), 400);
+      newAccount = await dbManager.addAccount(String(alias || "").trim(), String(api_key).trim(), "", provider);
     }
 
     // 绑定成功后，后台深度同步该账号域名（逐个拉取 DNS 记录自动分类），不阻塞响应
-    if (newAccount && newAccount.id) {
+    if (newAccount && newAccount.id && (provider === "dnshe" || provider === "cloudflare")) {
       c.executionCtx.waitUntil(resyncAccountsInBackground(dbManager, [newAccount.id]));
     }
 
@@ -957,13 +970,14 @@ app.post("/api/accounts/batch", async (c) => {
   const dbManager = c.get("db");
   try {
     const body = await c.req.json().catch(() => ({}));
-    const provider = body.provider === "cloudflare" ? "cloudflare" : "dnshe";
+    const provider = String(body.provider || "dnshe") as PlatformId;
+    getPlatformDefinition(provider);
     const items = Array.isArray(body.accounts) ? body.accounts : [];
     if (items.length === 0) {
       return c.json(errorRes(
         provider === "cloudflare"
           ? "请至少提供一条账号信息（api_token）"
-          : "请至少提供一条账号信息（api_key + api_secret）",
+          : provider === "dnshe" ? "请至少提供一条账号信息（api_key + api_secret）" : "请至少提供一条账号信息",
         "bad_request"
       ), 400);
     }
@@ -1005,6 +1019,45 @@ app.post("/api/accounts/batch", async (c) => {
       const apiKey = String(item?.api_key || "").trim();
       const apiSecret = String(item?.api_secret || "").trim();
 
+      if (provider === "dnsneko") {
+        const username = String(item?.username || "").trim();
+        if (!username || !apiKey) {
+          failCount++;
+          results.push({ api_key: apiKey || "(未填写)", success: false, message: "缺少 Username 或 API Key" });
+          continue;
+        }
+        try {
+          const newAccount = await dbManager.addAccount(alias, username, apiKey, provider);
+          newAccountIds.push(newAccount.id);
+          successCount++;
+          results.push({ api_key: `${apiKey.slice(0, 4)}***`, alias: newAccount.alias, success: true, message: "绑定成功" });
+        } catch (e: unknown) {
+          failCount++;
+          results.push({ api_key: `${apiKey.slice(0, 4)}***`, success: false, message: e instanceof Error ? e.message : "未知错误" });
+        }
+        await sleep(800);
+        continue;
+      }
+
+      if (provider === "gleam") {
+        if (!apiKey) {
+          failCount++;
+          results.push({ api_key: "(未填写)", success: false, message: "缺少 API Key" });
+          continue;
+        }
+        try {
+          const newAccount = await dbManager.addAccount(alias, apiKey, "", provider);
+          newAccountIds.push(newAccount.id);
+          successCount++;
+          results.push({ api_key: `${apiKey.slice(0, 4)}***`, alias: newAccount.alias, success: true, message: "绑定成功" });
+        } catch (e: unknown) {
+          failCount++;
+          results.push({ api_key: `${apiKey.slice(0, 4)}***`, success: false, message: e instanceof Error ? e.message : "未知错误" });
+        }
+        await sleep(800);
+        continue;
+      }
+
       if (!apiKey || !apiSecret) {
         failCount++;
         results.push({ api_key: apiKey || "(未填写)", success: false, message: "缺少 API Key 或 API Secret" });
@@ -1026,7 +1079,7 @@ app.post("/api/accounts/batch", async (c) => {
     }
 
     // 绑定完成后在后台逐个同步域名（间隔 1.2s 限频），不阻塞 HTTP 响应
-    if (newAccountIds.length > 0) {
+    if (newAccountIds.length > 0 && (provider === "dnshe" || provider === "cloudflare")) {
       c.executionCtx.waitUntil(resyncAccountsInBackground(dbManager, newAccountIds));
     }
 
@@ -1056,11 +1109,21 @@ app.put("/api/accounts/:id", async (c) => {
     const apiToken = body.api_token !== undefined ? String(body.api_token).trim() : undefined;
     const apiSecret = body.api_secret !== undefined ? String(body.api_secret) : undefined;
 
-    const updatedAccount = await dbManager.updateAccount(id, alias, apiKey, apiToken ?? apiSecret);
+    const existingAccount = (await dbManager.getAccounts()).find((account) => account.id === id);
+    if (!existingAccount) return c.json(errorRes(`未找到 ID 为 ${id} 的账户`, "not_found"), 404);
+    const updatePrimary = existingAccount.provider === "dnsneko"
+      ? (body.username !== undefined ? String(body.username) : undefined)
+      : apiKey;
+    const updateSecret = existingAccount.provider === "dnsneko"
+      ? apiKey
+      : existingAccount.provider === "gleam"
+        ? (apiKey !== undefined ? apiKey : undefined)
+        : apiToken ?? apiSecret;
+    const updatedAccount = await dbManager.updateAccount(id, alias, updatePrimary, updateSecret);
 
     // 若更换了凭据，则后台深度重新同步该账号的域名缓存；仅改别名时只需就地改掉配额缓存里的别名
     const credentialsChanged = Boolean(apiToken) || Boolean(apiKey && apiSecret);
-    if (credentialsChanged) {
+    if (credentialsChanged && (existingAccount.provider === "dnshe" || existingAccount.provider === "cloudflare")) {
       c.executionCtx.waitUntil(resyncAccountsInBackground(dbManager, [updatedAccount.id]));
     } else {
       await dbManager.renameAccountInQuotaCache(updatedAccount.id, updatedAccount.alias);
@@ -1090,6 +1153,139 @@ app.delete("/api/accounts/:id", async (c) => {
 });
 
 /**
+ * 统一实时聚合接口。旧的 /api/domains 保持 D1 快照语义，
+ * 此接口用于跨四个平台直接读取当前账号资产。
+ */
+app.get("/api/unified/domains", async (c) => {
+  const dbManager = c.get("db");
+  const requestedProvider = c.req.query("provider");
+  const requestedAccount = Number(c.req.query("account_id"));
+  try {
+    const accounts = await dbManager.getAccounts();
+    const selected = accounts.filter((account) =>
+      (!requestedProvider || account.provider === requestedProvider) &&
+      (!Number.isFinite(requestedAccount) || requestedAccount <= 0 || account.id === requestedAccount)
+    );
+    const domains = (await Promise.all(selected.map(async (account) => {
+      const auth = await dbManager.getPlatformCredentials(account.id);
+      return getPlatformAdapter(auth.provider).listDomains(auth.credentials, account.id, account.alias);
+    }))).flat();
+    return c.json(successRes({ domains, live: true, generated_at: new Date().toISOString() }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "聚合平台域名失败";
+    return c.json(errorRes(message, "platform_aggregate_failed"), 502);
+  }
+});
+
+type UnifiedRecordBody = { name?: unknown; type?: unknown; content?: unknown; ttl?: unknown; priority?: unknown; line?: unknown };
+
+function unifiedRecordInput(body: UnifiedRecordBody): CreateDnsRecordParams {
+  const type = String(body.type || "").trim().toUpperCase();
+  const content = String(body.content || "").trim();
+  if (!type || !content) throw new Error("记录类型与记录值均不能为空");
+  return {
+    subdomain_id: 0,
+    type,
+    name: String(body.name || "@").trim() || "@",
+    content,
+    ttl: Number(body.ttl) > 0 ? Number(body.ttl) : 600,
+    priority: Number.isFinite(Number(body.priority)) ? Number(body.priority) : undefined,
+    line: body.line ? String(body.line) : undefined
+  };
+}
+
+async function unifiedAdapterFor(dbManager: DatabaseManager, accountId: number) {
+  const auth = await dbManager.getPlatformCredentials(accountId);
+  return { auth, adapter: getPlatformAdapter(auth.provider) };
+}
+
+app.get("/api/unified/records/:accountId/:domainId", async (c) => {
+  const dbManager = c.get("db");
+  try {
+    const accountId = Number(c.req.param("accountId"));
+    const domainId = c.req.param("domainId");
+    const { auth, adapter } = await unifiedAdapterFor(dbManager, accountId);
+    return c.json(successRes({ records: await adapter.listRecords(auth.credentials, domainId), platform: auth.provider }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "读取解析记录失败";
+    return c.json(errorRes(message, "records_read_failed"), 502);
+  }
+});
+
+app.post("/api/unified/records/:accountId/:domainId", async (c) => {
+  const dbManager = c.get("db");
+  try {
+    const accountId = Number(c.req.param("accountId"));
+    const domainId = c.req.param("domainId");
+    const input = unifiedRecordInput(await c.req.json() as UnifiedRecordBody);
+    const { auth, adapter } = await unifiedAdapterFor(dbManager, accountId);
+    if (auth.provider === "cloudflare") {
+      const domain = (await adapter.listDomains(auth.credentials, accountId, auth.alias)).find((item) => item.id === domainId);
+      input.zone_name = domain?.name || "";
+    }
+    const record = await adapter.createRecord(auth.credentials, domainId, input);
+    return c.json(successRes({ record, platform: auth.provider }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "创建解析记录失败";
+    return c.json(errorRes(message, "records_create_failed"), 400);
+  }
+});
+
+app.put("/api/unified/records/:accountId/:domainId/:recordId", async (c) => {
+  const dbManager = c.get("db");
+  try {
+    const accountId = Number(c.req.param("accountId"));
+    const domainId = c.req.param("domainId");
+    const recordId = c.req.param("recordId");
+    const input = unifiedRecordInput(await c.req.json() as UnifiedRecordBody);
+    const { auth, adapter } = await unifiedAdapterFor(dbManager, accountId);
+    if (auth.provider === "cloudflare") {
+      const domain = (await adapter.listDomains(auth.credentials, accountId, auth.alias)).find((item) => item.id === domainId);
+      input.zone_name = domain?.name || "";
+    }
+    const record = await adapter.updateRecord(auth.credentials, domainId, recordId, { ...input, record_id: recordId });
+    return c.json(successRes({ record, platform: auth.provider }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "更新解析记录失败";
+    return c.json(errorRes(message, "records_update_failed"), 400);
+  }
+});
+
+app.delete("/api/unified/records/:accountId/:domainId/:recordId", async (c) => {
+  const dbManager = c.get("db");
+  try {
+    const accountId = Number(c.req.param("accountId"));
+    const { auth, adapter } = await unifiedAdapterFor(dbManager, accountId);
+    await adapter.deleteRecord(auth.credentials, c.req.param("domainId"), c.req.param("recordId"));
+    return c.json(successRes({ platform: auth.provider }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "删除解析记录失败";
+    return c.json(errorRes(message, "records_delete_failed"), 400);
+  }
+});
+
+app.post("/api/unified/records/batch", async (c) => {
+  const dbManager = c.get("db");
+  try {
+    const body = await c.req.json() as { account_id?: unknown; domain_id?: unknown; operation?: unknown; ids?: unknown; value?: unknown };
+    const accountId = Number(body.account_id);
+    const domainId = String(body.domain_id || "");
+    const operation = String(body.operation || "") as "delete" | "status" | "ttl" | "line";
+    const ids = Array.isArray(body.ids) ? body.ids.map(String).filter(Boolean) : [];
+    if (!Number.isInteger(accountId) || !domainId || !["delete", "status", "ttl", "line"].includes(operation) || ids.length === 0 || ids.length > 100) {
+      return c.json(errorRes("批量解析参数无效", "bad_request"), 400);
+    }
+    const { auth, adapter } = await unifiedAdapterFor(dbManager, accountId);
+    if (!adapter.batchOperation) return c.json(errorRes(`${auth.provider} 不支持该批量操作`, "unsupported_batch_operation"), 400);
+    await adapter.batchOperation(auth.credentials, domainId, operation, ids, body.value as string | number | boolean | undefined);
+    return c.json(successRes({ platform: auth.provider, operation, count: ids.length }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "批量解析操作失败";
+    return c.json(errorRes(message, "batch_operation_failed"), 400);
+  }
+});
+
+/**
  * 域名管理 API
  */
 
@@ -1104,9 +1300,22 @@ app.get("/api/domains", async (c) => {
   const accountIdStr = c.req.query("account_id");
   const accountId = accountIdStr ? parseInt(accountIdStr, 10) : undefined;
   const providerParam = c.req.query("provider");
-  const provider = providerParam === "cloudflare" || providerParam === "dnshe" ? providerParam : undefined;
+  const provider = providerParam === "cloudflare" || providerParam === "dnshe" || providerParam === "dnsneko" || providerParam === "gleam" ? providerParam as PlatformId : undefined;
 
   try {
+    if (provider === "dnsneko" || provider === "gleam") {
+      const accounts = await dbManager.getAccounts(provider);
+      const adapter = getPlatformAdapter(provider);
+      const results = await Promise.all(accounts.map(async (account) => {
+        const auth = await dbManager.getPlatformCredentials(account.id);
+        return adapter.listDomains(auth.credentials, account.id, account.alias);
+      }));
+      const domains = results.flat().filter((domain) => {
+        const keyword = search.trim().toLowerCase();
+        return (!keyword || domain.name.toLowerCase().includes(keyword) || domain.accountAlias.toLowerCase().includes(keyword)) && (!status || domain.status === status);
+      });
+      return c.json(successRes({ domains, last_sync: null, live: true }));
+    }
     const domains = await dbManager.getDomains(search, status, accountId, provider);
     // 顺手带上「这份快照有多新」—— 域名列表读的是本地缓存，不给时间戳用户无法判断数据是否过期
     const lastSync = await dbManager.getLastSyncInfo();
@@ -1151,7 +1360,7 @@ app.post("/api/domains/sync", async (c) => {
   }
 
   try {
-    const allAccounts = await dbManager.getAccounts();
+    const allAccounts = (await dbManager.getAccounts()).filter((account) => account.provider === "dnshe" || account.provider === "cloudflare");
     const requested = Array.isArray(body.account_ids)
       ? (body.account_ids as unknown[]).map((x) => parseInt(String(x), 10)).filter((n) => Number.isFinite(n))
       : null;
@@ -2417,7 +2626,7 @@ app.delete("/api/domains/:id/dns/:record_id", async (c) => {
 async function fetchAllQuotas(dbManager: DatabaseManager): Promise<{ accounts: Array<{ id: number; alias: string }>; quotas: any[] }> {
   const allAccounts = await dbManager.getAccounts();
   // Cloudflare 账号没有 DNSHE 式配额概念，跳过查询避免无意义的上游报错
-  const accounts = allAccounts.filter((acc) => acc.provider !== "cloudflare");
+  const accounts = allAccounts.filter((acc) => acc.provider === "dnshe");
 
   // 并发发起所有账号的配额查询请求
   const quotaPromises = accounts.map(async (acc) => {
@@ -3244,7 +3453,7 @@ app.get("/api/keys", async (c) => {
 
     // 全部账号视图：有界并发读取。每个账号使用独立凭据，4 路并发可显著降低
     // 多账号等待时间；单账号失败保留该账号的本地快照，不把错误伪装成空列表。
-    const accounts = (await dbManager.getAccounts()).filter((a) => a.provider !== "cloudflare");
+    const accounts = (await dbManager.getAccounts()).filter((a) => a.provider === "dnshe");
     const groups: Array<{ account_id: number; alias: string; keys: Array<Record<string, unknown>>; error?: string }> = [];
     const results = await mapWithConcurrency(accounts, 4, async (acc) => {
       try {
@@ -3546,7 +3755,7 @@ async function fetchAssistSnapshot(dbManager: DatabaseManager): Promise<{
   accounts: Array<Record<string, unknown>>;
   updated_at: string;
 }> {
-  const allAccounts = (await dbManager.getAccounts()).filter((a) => a.provider !== "cloudflare");
+  const allAccounts = (await dbManager.getAccounts()).filter((a) => a.provider === "dnshe");
 
   // 并行拉取（每账号 3 个上游请求）。DNSHE 限 30 次/分钟，错开 150ms/账号
   // 把 18 个请求摊开成 ~1s 的窗口，既比旧串行版快 5 倍多，又不至于瞬时打满限额。
@@ -3714,7 +3923,7 @@ app.post("/api/assist/assist", async (c) => {
 
   try {
     const allAccounts = (await dbManager.getAccounts())
-      .filter((a) => a.provider !== "cloudflare")
+      .filter((a) => a.provider === "dnshe")
       .filter((a) => !excludeIds.has(a.id));
 
     // 1. 并行探各账号的助力余额与「是否已助力过该码」（串行 + 300ms 间隔时 6 个账号要 10 秒以上）
@@ -4457,8 +4666,10 @@ app.get("/api/overview", async (c) => {
       },
       accounts: {
         total: accounts.length,
-        dnshe: accounts.filter((a) => a.provider !== "cloudflare").length,
+        dnshe: accounts.filter((a) => a.provider === "dnshe").length,
         cloudflare: accounts.filter((a) => a.provider === "cloudflare").length,
+        dnsneko: accounts.filter((a) => a.provider === "dnsneko").length,
+        gleam: accounts.filter((a) => a.provider === "gleam").length,
       },
       quota: {
         total: quotaTotal,

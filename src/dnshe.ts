@@ -184,6 +184,8 @@ export interface CreateDnsRecordParams {
   weight?: number;
   port?: number;
   target?: string;
+  /** Cloudflare 适配器用于把相对主机名补成完整 FQDN；DNSHE 忽略。 */
+  zone_name?: string;
 }
 
 /** 更新 DNS 记录参数 */

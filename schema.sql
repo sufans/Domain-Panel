@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     alias TEXT NOT NULL,                  -- 账号别名
     api_key TEXT NOT NULL UNIQUE,         -- API Key（Cloudflare 账号存 CF account id，防重复绑定）
     api_secret TEXT NOT NULL,             -- 加密后的 API Secret（Cloudflare 账号存加密后的 API Token）
-    provider TEXT NOT NULL DEFAULT 'dnshe', -- 账号提供商 (dnshe/cloudflare)
+    provider TEXT NOT NULL DEFAULT 'dnshe', -- 账号提供商（由代码平台注册表校验，不在数据库固定枚举）
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 

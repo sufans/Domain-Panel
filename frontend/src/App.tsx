@@ -150,7 +150,7 @@ interface Account {
   id: number;
   alias: string;
   api_key: string;
-  provider?: "dnshe" | "cloudflare";
+  provider?: "dnshe" | "cloudflare" | "dnsneko" | "gleam";
   created_at: string;
 }
 
@@ -904,6 +904,7 @@ export default function App() {
   const [newAlias, setNewAlias] = useState("");
   const [newApiKey, setNewApiKey] = useState("");
   const [newApiSecret, setNewApiSecret] = useState("");
+  const [newUsername, setNewUsername] = useState("");
 
   // 批量绑定表单状态
   const [batchInput, setBatchInput] = useState("");
@@ -911,7 +912,7 @@ export default function App() {
 
   // 绑定账号弹窗（统一承载 DNSHE / Cloudflare 两种提供商与 单个 / 批量 两种方式）
   const [bindModalOpen, setBindModalOpen] = useState(false);
-  const [bindProvider, setBindProvider] = useState<"dnshe" | "cloudflare">("dnshe");
+  const [bindProvider, setBindProvider] = useState<"dnshe" | "cloudflare" | "dnsneko" | "gleam">("dnshe");
   const [bindMode, setBindMode] = useState<"single" | "batch">("single");
   // 批量输入框引用（自绘拖拽调整高度用）
   const batchTextareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -3324,7 +3325,7 @@ export default function App() {
   // DNSHE 账号列表（Cloudflare 账号在独立标签页展示，DNSHE 的账号选择/注册/查重等
   // 场景都应排除它们）
   const dnsheAccounts = useMemo(
-    () => accounts.filter((a) => a.provider !== "cloudflare"),
+    () => accounts.filter((a) => a.provider === "dnshe"),
     [accounts]
   );
 
@@ -3663,6 +3664,30 @@ export default function App() {
   // 绑定新账号（别名可选，留空时后端自动从 API Key 解析密钥名称）
   const handleAddAccount = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (bindProvider === "dnsneko" || bindProvider === "gleam") {
+      if (!newApiKey.trim() || (bindProvider === "dnsneko" && !newUsername.trim())) {
+        showToast("error", bindProvider === "dnsneko" ? "Username 与 API Key 为必填项！" : "API Key 为必填项！");
+        return;
+      }
+      setActionLoading("add-account");
+      try {
+        const res = await apiFetch("/api/accounts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ provider: bindProvider, alias: newAlias, api_key: newApiKey, username: newUsername })
+        });
+        const data = await res.json();
+        if (!data.success) throw new Error(data.message || "账号绑定失败");
+        showToast("success", `账号 [${data.account?.alias || newAlias || newApiKey}] 验证并绑定成功！`);
+        setNewAlias(""); setNewApiKey(""); setNewApiSecret(""); setNewUsername(""); setBindModalOpen(false);
+        await fetchAccounts();
+      } catch (error) {
+        showToast("error", error instanceof Error ? error.message : "账号绑定失败");
+      } finally {
+        setActionLoading(null);
+      }
+      return;
+    }
     if (!newApiKey.trim() || !newApiSecret.trim()) {
       showToast("error", "API Key 与 API Secret 为必填项！");
       return;
@@ -3684,6 +3709,7 @@ export default function App() {
         setNewAlias("");
         setNewApiKey("");
         setNewApiSecret("");
+        setNewUsername("");
         setBindModalOpen(false);
         fetchAccounts();
         // 域名由后端 waitUntil 后台深度同步，轮询等它落库后再刷新列表
@@ -3703,6 +3729,34 @@ export default function App() {
 
   // 批量绑定账号（每行一条：API Key + API Secret，支持空格/逗号/Tab 等分隔，别名留空自动解析）
   const handleBatchAddAccounts = async () => {
+    if (bindProvider === "dnsneko" || bindProvider === "gleam") {
+      const lines = splitBatchLines(batchInput);
+      const parsed = lines.map((line) => {
+        const parts = line.split(/[\s,，|]+/).map((part) => part.trim()).filter(Boolean);
+        return bindProvider === "dnsneko"
+          ? { username: parts[0] || "", api_key: parts[1] || "", alias: parts.slice(2).join(" ") }
+          : { api_key: parts[0] || "", alias: parts.slice(1).join(" ") };
+      }).filter((item) => bindProvider === "dnsneko" ? item.username && item.api_key : item.api_key);
+      if (parsed.length === 0) {
+        showToast("error", bindProvider === "dnsneko" ? "每行需要 Username 与 API Key" : "每行需要 API Key");
+        return;
+      }
+      setActionLoading("batch-add-accounts");
+      try {
+        const res = await apiFetch("/api/accounts/batch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: bindProvider, accounts: parsed }) });
+        const data = await res.json();
+        setBatchResults(data.results || []);
+        if (!data.success) throw new Error(data.message || "批量绑定失败");
+        showToast(data.fail_count ? "warning" : "success", data.message || "批量绑定完成");
+        setBatchInput("");
+        await fetchAccounts();
+      } catch (error) {
+        showToast("error", error instanceof Error ? error.message : "批量绑定失败");
+      } finally {
+        setActionLoading(null);
+      }
+      return;
+    }
     const lines = splitBatchLines(batchInput);
     if (lines.length === 0) {
       showToast("error", "请先粘贴至少一条 API Key 与 API Secret");
@@ -10385,7 +10439,7 @@ export default function App() {
                     </>
                   ) : (
                     <>
-                      <Plus className="w-5 h-5 text-primary" /> 绑定 DNSHE 账号
+                      <Plus className="w-5 h-5 text-primary" /> 绑定 {bindProvider === "dnsneko" ? "DNSNEKO" : bindProvider === "gleam" ? "GLEAM" : "DNSHE"} 账号
                     </>
                   )}
                 </h3>
@@ -10403,7 +10457,7 @@ export default function App() {
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="block text-xs font-semibold text-content-muted mb-1.5">账号提供商</label>
-                    <div className="grid grid-cols-2 gap-1 bg-elevated border border-border-base rounded p-1">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 bg-elevated border border-border-base rounded p-1">
                       <button
                         type="button"
                         onClick={() => setBindProvider("dnshe")}
@@ -10421,6 +10475,20 @@ export default function App() {
                         }`}
                       >
                         Cloudflare
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setBindProvider("dnsneko")}
+                        className={`py-1.5 rounded-md text-xs font-semibold transition-all ${bindProvider === "dnsneko" ? "bg-primary text-primary-fg shadow" : "text-content-muted hover:text-content-primary"}`}
+                      >
+                        DNSNEKO
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setBindProvider("gleam")}
+                        className={`py-1.5 rounded-md text-xs font-semibold transition-all ${bindProvider === "gleam" ? "bg-primary text-primary-fg shadow" : "text-content-muted hover:text-content-primary"}`}
+                      >
+                        GLEAM
                       </button>
                     </div>
                   </div>
@@ -10582,6 +10650,21 @@ export default function App() {
                         ))}
                       </div>
                     )}
+                  </div>
+                )}
+
+                {bindProvider !== "dnshe" && bindProvider !== "cloudflare" && (
+                  <div className="space-y-4 pt-1">
+                    <form onSubmit={handleAddAccount} className="space-y-4">
+                      <div>
+                        <label className="block text-xs font-semibold text-content-muted mb-1.5">账户别名（可选）</label>
+                        <input type="text" value={newAlias} onChange={(e) => setNewAlias(e.target.value)} placeholder={`留空使用 ${bindProvider.toUpperCase()} 凭证标识`} className="w-full form-input px-3 h-10 rounded text-sm text-content-secondary" />
+                      </div>
+                      {bindProvider === "dnsneko" && <div><label className="block text-xs font-semibold text-content-muted mb-1.5">Username</label><input type="text" required value={newUsername} onChange={(e) => setNewUsername(e.target.value)} className="w-full form-input px-3 h-10 rounded text-sm text-content-secondary" /></div>}
+                      <div><label className="block text-xs font-semibold text-content-muted mb-1.5">API Key</label><PasswordInput required name={`${bindProvider}-bind-api-key`} autoComplete="new-password" value={newApiKey} onChange={setNewApiKey} placeholder={bindProvider === "gleam" ? "hl6_xxxxxxxxxxxx" : "粘贴 DNSNEKO API Key"} className="w-full form-input px-3 h-10 rounded text-sm text-content-secondary font-mono" /></div>
+                      <div className="flex gap-2 pt-1"><button type="button" onClick={() => setBindModalOpen(false)} className="flex-1 h-10 bg-elevated text-content-muted border border-border-base px-2.5 rounded text-sm">取消</button><button type="submit" disabled={actionLoading === "add-account"} className="flex-1 h-10 btn-primary rounded text-sm font-semibold text-white disabled:opacity-50">{actionLoading === "add-account" ? "正在验证…" : "绑定账号"}</button></div>
+                    </form>
+                    {bindMode === "batch" && <div className="border-t border-border-base pt-4 space-y-3"><p className="text-xs text-content-muted">批量格式：{bindProvider === "dnsneko" ? "Username APIKey [别名]" : "APIKey [别名]"}，每行一条。</p><textarea ref={batchTextareaRef} value={batchInput} onChange={(e) => setBatchInput(e.target.value)} rows={5} className="w-full form-input px-3 py-2.5 rounded text-sm font-mono text-content-secondary resize-none" /><button onClick={handleBatchAddAccounts} disabled={actionLoading === "batch-add-accounts"} className="w-full btn-primary py-2.5 rounded font-semibold text-sm text-white disabled:opacity-50">开始批量绑定</button></div>}
                   </div>
                 )}
 

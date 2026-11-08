@@ -1,9 +1,11 @@
 import { DNSHEClient, DNSHEApiError } from "./dnshe";
 import { CloudflareClient } from "./cloudflare";
 import { DNS_THREE_STATES } from "./dns-provider";
+import type { PlatformCredentials, PlatformId } from "./platforms";
+import { assertPlatformCredentials, getPlatformAdapter } from "./platforms";
 
 /** 绑定账号的提供商 */
-export type AccountProvider = "dnshe" | "cloudflare";
+export type AccountProvider = PlatformId;
 
 function credentialVerificationError(prefix: string, error: unknown): Error {
   const message = error instanceof Error ? error.message : "未知错误";
@@ -1081,7 +1083,7 @@ export class DatabaseManager {
       }
       if (!finalAlias) finalAlias = `Cloudflare ${String(verify.token_id).slice(0, 8)}`;
       if (uniqueKey === apiKey) uniqueKey = `cf:token:${verify.token_id}`;
-    } else {
+    } else if (provider === "dnshe") {
       const client = new DNSHEClient(apiKey, apiSecret);
 
       // 别名处理：为空时调用 keys/list 同时完成校验与别名解析（一次请求）
@@ -1099,6 +1101,16 @@ export class DatabaseManager {
           throw credentialVerificationError("无法验证 API 密钥", e);
         }
       }
+    } else {
+      const credentials: PlatformCredentials = provider === "dnsneko"
+        ? { username: apiKey, apiKey: apiSecret }
+        : { apiKey };
+      assertPlatformCredentials(provider, provider === "dnsneko" ? { username: credentials.username, api_key: credentials.apiKey } : { api_key: credentials.apiKey });
+      const adapter = getPlatformAdapter(provider);
+      await adapter.verify(credentials);
+      if (!finalAlias) finalAlias = `${provider.toUpperCase()} ${apiKey.slice(0, 8)}`;
+      uniqueKey = provider === "dnsneko" ? apiSecret : apiKey;
+      credential = provider === "dnsneko" ? apiKey : apiSecret;
     }
 
     const encryptedSecret = await encryptText(credential, this.aesKey);
@@ -1182,7 +1194,7 @@ export class DatabaseManager {
         }
         finalEncryptedSecret = await encryptText(newToken, this.aesKey);
       }
-    } else {
+    } else if (existingRow.provider === "dnshe") {
       // 若提供了新的 API Key/Secret，则校验有效性并加密替换；留空表示保持不变
       const newKey = (apiKey || "").trim();
       const newSecret = (apiSecret || "").trim();
@@ -1198,6 +1210,20 @@ export class DatabaseManager {
         }
         finalApiKey = newKey;
         finalEncryptedSecret = await encryptText(newSecret, this.aesKey);
+      }
+    } else {
+      const newPrimary = (apiKey || "").trim();
+      const newSecret = (apiSecret || "").trim();
+      if (newPrimary || newSecret) {
+        if (!newPrimary || !newSecret) throw new Error("更换平台凭证时，必填字段必须同时填写");
+        const platform = existingRow.provider as PlatformId;
+        const credentials: PlatformCredentials = platform === "dnsneko"
+          ? { username: newPrimary, apiKey: newSecret }
+          : { apiKey: newPrimary };
+        assertPlatformCredentials(platform, platform === "dnsneko" ? { username: newPrimary, api_key: newSecret } : { api_key: newPrimary });
+        await getPlatformAdapter(platform).verify(credentials);
+        finalApiKey = platform === "dnsneko" ? newSecret : newPrimary;
+        finalEncryptedSecret = await encryptText(platform === "dnsneko" ? newPrimary : newSecret, this.aesKey);
       }
     }
 
@@ -1264,11 +1290,29 @@ export class DatabaseManager {
         provider: "cloudflare"
       };
     }
+    if (typedAccount.provider && typedAccount.provider !== "dnshe") {
+      throw new Error(`平台 ${typedAccount.provider} 请使用统一平台适配器`);
+    }
     return {
       client: new DNSHEClient(typedAccount.api_key, apiSecret),
       alias: typedAccount.alias,
       provider: "dnshe"
     };
+  }
+
+  /** 读取统一平台注册表所需的解密凭证；不会把 Secret 返回给浏览器。 */
+  async getPlatformCredentials(id: number): Promise<{ provider: PlatformId; alias: string; credentials: PlatformCredentials }> {
+    const account = await this.db.prepare(
+      "SELECT alias, api_key, api_secret, provider FROM accounts WHERE id = ?"
+    ).bind(id).first();
+    if (!account) throw new Error(`未找到 ID 为 ${id} 的账户`);
+    const row = account as { alias: string; api_key: string; api_secret: string; provider?: string };
+    const provider = (row.provider || "dnshe") as PlatformId;
+    const secret = await decryptText(row.api_secret, this.aesKey);
+    if (provider === "cloudflare") return { provider, alias: row.alias, credentials: { apiToken: secret } };
+    if (provider === "dnshe") return { provider, alias: row.alias, credentials: { apiKey: row.api_key, apiSecret: secret } };
+    if (provider === "dnsneko") return { provider, alias: row.alias, credentials: { username: secret, apiKey: row.api_key } };
+    return { provider, alias: row.alias, credentials: { apiKey: secret || row.api_key } };
   }
 
   /**
