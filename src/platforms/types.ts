@@ -28,6 +28,8 @@ export interface PlatformDefinition {
   description: string;
   credentialFields: PlatformCredentialField[];
   capabilities: PlatformCapability[];
+  /** 上游允许创建/修改的记录类型；缺省表示不限。 */
+  recordTypes?: string[];
   upstreamHosts: string[];
   rateLimit: { requests: number; windowSeconds: number };
 }

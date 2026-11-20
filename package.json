@@ -25,6 +25,7 @@
     "test:auth:logs": "node scripts/test-auth-logs.mjs",
     "test:accounts:binding": "node scripts/test-account-binding-errors.mjs",
     "test:platforms": "node scripts/test-platform-registry.mjs",
+    "test:platforms:contracts": "node scripts/test-platform-contracts.mjs",
     "test:review:session": "node scripts/test-review-session.mjs",
     "test:quota:ui": "node scripts/test-cf-quota-ui.mjs",
     "test:style:ui": "node scripts/test-interface-style-ui.mjs",

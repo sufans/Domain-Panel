@@ -112,7 +112,7 @@ export function SourceMappedOverview(props: SourceMappedOverviewProps) {
   const cards = props.view === "cards";
   const domains = props.domains;
   const assets = [
-    { label: "已注册域名", value: domains?.total, hint: "当前托管在 DNSHE 的域名总数", tab: "domains" },
+    { label: "已注册域名", value: domains?.total, hint: "当前托管在 DNSHE 的域名总数（不含实时读取的平台）", tab: "domains" },
     { label: "可注册域名", value: props.quota?.available, hint: props.quota?.failed ? `${count(props.quota.failed)} 个账号额度未取到` : "各账号剩余额度合计", tab: "quota" },
     { label: "已委派域名", value: domains?.delegated, hint: "NS 已指向 Cloudflare 等外部服务商", tab: "domains" },
     { label: "未委派域名", value: domains?.not_delegated, hint: "仍使用 DNSHE 默认解析", tab: "domains" },
@@ -120,6 +120,8 @@ export function SourceMappedOverview(props: SourceMappedOverviewProps) {
   const identities = [
     { label: "DNSHE 账号", value: props.accounts?.dnshe ?? props.dnsheAccountCount, hint: "管理 DNSHE 账号", tab: "accounts" },
     { label: "Cloudflare 账号", value: props.accounts?.cloudflare ?? props.cloudflareAccountCount, hint: "管理 Cloudflare 账号", tab: "accounts" },
+    { label: "DNSNEKO 账号", value: props.accounts?.dnsneko ?? props.dnsnekoAccountCount, hint: "域名与解析记录", tab: "accounts" },
+    { label: "GLEAM 账号", value: props.accounts?.gleam ?? props.gleamAccountCount, hint: "子域名与解析记录", tab: "accounts" },
     { label: "总助力次数", value: props.assist?.assist_limit, hint: props.assist ? `已用 ${count(props.assist.assist_limit - props.assist.assist_remaining)} 次` : "去助力页同步", tab: "assist" },
     { label: "剩余助力次数", value: props.assist?.assist_remaining, hint: props.assist ? `上限 ${count(props.assist.assist_limit)}` : "去助力页同步", tab: "assist" },
     { label: "已永久化域名", value: props.assist?.upgraded_domains, hint: "已升级为永久，无需续期", tab: "assist" },

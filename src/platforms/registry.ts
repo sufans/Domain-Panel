@@ -41,6 +41,8 @@ const definitions: Record<PlatformId, PlatformDefinition> = {
     description: "GLEAM 子域名和解析记录管理",
     credentialFields: [{ key: "api_key", label: "API Key", required: true, secret: true, placeholder: "hl6_xxxxxxxxxxxx" }],
     capabilities: ["domains.read", "records.read", "records.create", "records.update", "records.delete"],
+    // 上游文档：创建只接受 A / AAAA / CNAME / TXT，TTL 由服务商自动决定，类型创建后不可改。
+    recordTypes: ["A", "AAAA", "CNAME", "TXT"],
     upstreamHosts: ["sld.0n.pub"],
     rateLimit: { requests: 55, windowSeconds: 60 }
   }
@@ -53,6 +55,7 @@ export function listPlatformDefinitions(): PlatformDefinition[] {
     ...definition,
     credentialFields: definition.credentialFields.map((field) => ({ ...field })),
     capabilities: [...definition.capabilities],
+    ...(definition.recordTypes ? { recordTypes: [...definition.recordTypes] } : {}),
     upstreamHosts: [...definition.upstreamHosts]
   }));
 }

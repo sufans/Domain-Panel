@@ -30,3 +30,31 @@
 5. 为认证头、分页、字段映射、错误和不支持能力添加脱敏夹具测试。
 
 凭证只在服务端从 D1 解密并使用；账号列表、日志和平台元数据接口均不返回明文密钥。
+
+ ## 统一 API 路由
+
+ 平台记录操作同时挂载 `/api/unified/records/...` 与 `/api/records/...` 两条路径，前端可按习惯选用。
+
+ - `GET /api/domains/:accountId/:domainId`：返回单个域名的统一模型详情，由统一路由抽取并缓存，不与 `/dns`、`/propagation` 等旧路径冲突。
+ - `POST /api/accounts/:id/check`：只读连接检测，返回 `{ ok, platform, alias, identity, checked_at }`，不写日志凭据，不返回 Secret。
+
+ ## 平台定义字段
+
+ 除能力矩阵外，平台定义还支持：
+
+ - `recordTypes?: string[]`：上游允许的记录类型白名单。缺省表示不限。例如 GLEAM 只允许 `A / AAAA / CNAME / TXT`，前端据此裁剪下拉列表。
+
+ ## 错误码
+
+ | 错误码 | 含义 |
+ | --- | --- |
+ | `unsupported_operation` | 该平台不支持此操作（能力矩阵检查） |
+ | `unsupported_batch_operation` | 该平台不支持批量操作（`batchOperation` 未实现） |
+ | `unsupported_record_type` | 提交的记录类型不在 `recordTypes` 白名单内，未到达上游 |
+ | `unsupported_platform` | 平台 ID 未注册 |
+
+ ## 安全边界
+
+ - 凭证只在服务端解密使用。`GET /api/accounts` 对 DNSNEKO / GLEAM 旧布局输出 `dnsneko:legacy:<sha256 前 12 字节>` 指纹，不泄露明文密钥。
+ - 前端通过 `POST /api/accounts/:id/check` 验证凭据有效性，不接触原始 Secret。
+ - 新增平台只需扩展 `PlatformId`、注册定义、实现 `PlatformAdapter`、添加测试夹具，不修改数据库 `CHECK` 约束或聚合路由。

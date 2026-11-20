@@ -38,6 +38,12 @@ function normalizeCfAlias(name: string): string {
   return stripped || String(name || "").trim();
 }
 
+/** 生成不可逆的短指纹：`accounts.api_key` 会原样返回给浏览器，不能存放真实密钥。 */
+async function credentialFingerprint(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest)).slice(0, 12).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 /**
  * 导入 Crypto 工具以处理 AES 加密
  * 
@@ -1102,15 +1108,23 @@ export class DatabaseManager {
         }
       }
     } else {
+      // 入参约定：DNSNEKO 为 (username, apiKey)，GLEAM 为 (apiKey, "")。
+      const username = String(apiKey || "").trim();
+      const secret = String(apiSecret || "").trim();
       const credentials: PlatformCredentials = provider === "dnsneko"
-        ? { username: apiKey, apiKey: apiSecret }
-        : { apiKey };
-      assertPlatformCredentials(provider, provider === "dnsneko" ? { username: credentials.username, api_key: credentials.apiKey } : { api_key: credentials.apiKey });
+        ? { username, apiKey: secret }
+        : { apiKey: username };
+      assertPlatformCredentials(provider, provider === "dnsneko" ? { username, api_key: secret } : { api_key: username });
       const adapter = getPlatformAdapter(provider);
-      await adapter.verify(credentials);
-      if (!finalAlias) finalAlias = `${provider.toUpperCase()} ${apiKey.slice(0, 8)}`;
-      uniqueKey = provider === "dnsneko" ? apiSecret : apiKey;
-      credential = provider === "dnsneko" ? apiKey : apiSecret;
+      const verified = await adapter.verify(credentials);
+      if (!finalAlias) {
+        finalAlias = String(verified.alias || "").trim()
+          || (provider === "dnsneko" ? `DNSNEKO ${username}` : `GLEAM ${username.slice(0, 6)}`);
+      }
+      // accounts.api_key 会被 /api/accounts 原样返回给浏览器，绝不能放真实密钥：
+      // DNSNEKO 存 `dnsneko:<username>`，GLEAM 存密钥的 SHA-256 指纹；真实密钥只进加密列。
+      uniqueKey = provider === "dnsneko" ? `dnsneko:${username}` : `gleam:${await credentialFingerprint(username)}`;
+      credential = provider === "dnsneko" ? secret : username;
     }
 
     const encryptedSecret = await encryptText(credential, this.aesKey);
@@ -1159,7 +1173,14 @@ export class DatabaseManager {
     const { results } = provider
       ? await statement.bind(provider).all<DBAccount>()
       : await statement.all<DBAccount>();
-    return results || [];
+    // 旧布局的 DNSNEKO / GLEAM 行把真实密钥放在 api_key 列里，这一列会随接口返回给浏览器，
+    // 必须在这里换成不可逆指纹；真实值仍只从加密列读取（见 getPlatformCredentials 的兼容分支）。
+    return Promise.all((results || []).map(async (row) => {
+      if (row.provider !== "dnsneko" && row.provider !== "gleam") return row;
+      const expectedPrefix = `${row.provider}:`;
+      if (row.api_key.startsWith(expectedPrefix)) return row;
+      return { ...row, api_key: `${expectedPrefix}legacy:${await credentialFingerprint(row.api_key)}` };
+    }));
   }
 
   /**
@@ -1214,16 +1235,22 @@ export class DatabaseManager {
     } else {
       const newPrimary = (apiKey || "").trim();
       const newSecret = (apiSecret || "").trim();
-      if (newPrimary || newSecret) {
-        if (!newPrimary || !newSecret) throw new Error("更换平台凭证时，必填字段必须同时填写");
-        const platform = existingRow.provider as PlatformId;
-        const credentials: PlatformCredentials = platform === "dnsneko"
-          ? { username: newPrimary, apiKey: newSecret }
-          : { apiKey: newPrimary };
-        assertPlatformCredentials(platform, platform === "dnsneko" ? { username: newPrimary, api_key: newSecret } : { api_key: newPrimary });
-        await getPlatformAdapter(platform).verify(credentials);
-        finalApiKey = platform === "dnsneko" ? newSecret : newPrimary;
-        finalEncryptedSecret = await encryptText(platform === "dnsneko" ? newPrimary : newSecret, this.aesKey);
+      const platform = existingRow.provider as PlatformId;
+      if (platform === "dnsneko") {
+        if (newPrimary || newSecret) {
+          if (!newPrimary || !newSecret) {
+            throw new Error("更换 DNSNEKO 凭证时，Username 与 API Key 必须同时填写");
+          }
+          await getPlatformAdapter(platform).verify({ username: newPrimary, apiKey: newSecret });
+          finalApiKey = `dnsneko:${newPrimary}`;
+          finalEncryptedSecret = await encryptText(newSecret, this.aesKey);
+        }
+      } else if (newPrimary || newSecret) {
+        // GLEAM 只有 API Key，两个字段传任一个都按新 Key 处理。
+        const key = newSecret || newPrimary;
+        await getPlatformAdapter(platform).verify({ apiKey: key });
+        finalApiKey = `gleam:${await credentialFingerprint(key)}`;
+        finalEncryptedSecret = await encryptText(key, this.aesKey);
       }
     }
 
@@ -1311,7 +1338,13 @@ export class DatabaseManager {
     const secret = await decryptText(row.api_secret, this.aesKey);
     if (provider === "cloudflare") return { provider, alias: row.alias, credentials: { apiToken: secret } };
     if (provider === "dnshe") return { provider, alias: row.alias, credentials: { apiKey: row.api_key, apiSecret: secret } };
-    if (provider === "dnsneko") return { provider, alias: row.alias, credentials: { username: secret, apiKey: row.api_key } };
+    if (provider === "dnsneko") {
+      // 现行布局：api_key = `dnsneko:<username>`，api_secret = 加密后的 API Key。
+      // 旧布局（早期版本）：api_key = API Key，api_secret = 加密后的 username —— 只读兼容，重新绑定后自然收敛。
+      return row.api_key.startsWith("dnsneko:")
+        ? { provider, alias: row.alias, credentials: { username: row.api_key.slice("dnsneko:".length), apiKey: secret } }
+        : { provider, alias: row.alias, credentials: { username: secret, apiKey: row.api_key } };
+    }
     return { provider, alias: row.alias, credentials: { apiKey: secret || row.api_key } };
   }
 

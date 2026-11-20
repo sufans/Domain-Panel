@@ -86,3 +86,47 @@ npm run build:pages --prefix frontend
 ```
 
 Pages 工作流安装 `frontend` 依赖，使用 `VITE_STATIC_DEMO=1` 构建真实前端，再上传 `frontend/dist`。
+
+## 2026-11-10：多平台 DNS 聚合管理（DNSHE / Cloudflare / DNSNEKO / GLEAM）
+
+ 以 DNSHE-Panel 的 Workers + D1 + KV 架构为基础，将平台调用重构为代码插件注册机制，四平台统一接入。
+
+### 平台注册表与适配器
+
+ - `src/platforms/registry.ts`：声明平台名称、凭证字段、能力矩阵、`recordTypes` 白名单、上游主机和限流参数。
+ - `src/platforms/types.ts`：统一 DTO（`PlatformId`、`UnifiedDomain`、`UnifiedRecord`、`PlatformCredentials`、`PlatformAdapter`）与错误类型。
+ - `src/platforms/adapters/dnsneko.ts` / `gleam.ts`：DNSNEKO（含 19 位雪花 ID 字符串保留）和 GLEAM（含幂等头、无 TTL、记录类型白名单）的适配器。
+
+### 统一 API 路由
+
+ - `GET /api/platforms`：动态返回平台能力矩阵（前端不再硬编码平台列表）。
+ - `GET /api/unified/domains`：跨平台实时聚合域名，单个账号失败不拖垮整张表。
+ - `GET /api/domains/:accountId/:domainId`：返回单个域名详情。
+ - `GET/POST/PUT/DELETE /api/unified/records/...` 与 `/api/records/...`（双路径）：记录 CRUD。
+ - `POST /api/unified/records/batch`：批量删除/状态/TTL/线路操作；不支持时返回 `unsupported_batch_operation`。
+ - `POST /api/accounts/:id/check`：只读连接检测。
+
+### 前端兼容
+
+ - `UnifiedPlatformAssets.tsx`：DNSNEKO / GLEAM 实时资产卡片（不在 D1 快照中），含筛选、记录面板、按平台裁剪的表单。
+ - `EditorialViews.tsx`：四平台账号看板，新平台显示「操作范围」而非「资源快照」。
+ - `SourceMappedOverview.tsx`：概览卡片四平台。
+ - `App.tsx`：概览身份条、账号页分区、域名页实时资产挂载均支持四平台；后端不可用时 `effectivePlatformDefinitions` 兜底。
+ - `demo-api.ts`：四平台样本数据。
+
+### 安全与兼容
+
+ - 旧布局（api_key 存密钥、api_secret 存 username）输出指纹 `dnsneko:legacy:<sha256 前 12 字节>`，不泄露明文。
+ - GLEAM 非法类型在调上游前拒绝（`unsupported_record_type`）。
+ - WHOIS 路由改为显式 `provider === "dnshe"` 而非 `!== "cloudflare"`。
+
+### 验证结果
+
+ - 契约测试 12/12 通过（认证头、字段映射、旧布局指纹、批量错误、类型白名单、短路径等）。
+ - 类型检查：根 + frontend 均 0 错误。
+ - Vite 构建通过。
+ - 浏览器验收：8 路由无溢出/错误/外网；设计风四平台账号分组 + 7 行；GLEAM 表单仅 A/AAAA/CNAME/TXT；390px 不溢出。
+ - 回归测试：CF 配额 23/23、概览 CF 5/5、续期规则 8/8、域名检查缓存 10/10 均通过。
+ - `git diff --check`：无空白错误。
+
+ 新增平台步骤：扩展 `PlatformId` → 注册定义 → 实现 `PlatformAdapter` → 测试夹具 → 前端自动适配。

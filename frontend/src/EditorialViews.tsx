@@ -271,43 +271,59 @@ export interface EditorialAccountUsage {
   verification?: "valid" | "permission" | "unknown";
   verificationLabel?: string;
 }
-export function EditorialAccountSwitchboard({ dnshe, cloudflare, onDnsheEdit, onDnsheDelete, onCfEdit, onCfDelete, onBindDnshe, onBindCf, usageByAccount = {} }: {
-  dnshe: EditorialAccount[]; cloudflare: EditorialAccount[];
+export function EditorialAccountSwitchboard({ dnshe, cloudflare, extended = [], onDnsheEdit, onDnsheDelete, onCfEdit, onCfDelete, onBindDnshe, onBindCf, onBindExtended, onExtendedEdit, onExtendedDelete, onExtendedCheck, checkingAccountId = null, usageByAccount = {} }: {
+  dnshe: EditorialAccount[]; cloudflare: EditorialAccount[]; extended?: EditorialAccount[];
   onDnsheEdit: (account: EditorialAccount) => void; onDnsheDelete: (account: EditorialAccount) => void; onCfEdit: (account: EditorialAccount) => void; onCfDelete: (account: EditorialAccount) => void;
-  onBindDnshe: () => void; onBindCf: () => void; usageByAccount?: Record<number, EditorialAccountUsage>;
+  onBindDnshe: () => void; onBindCf: () => void;
+  onBindExtended?: (platform: "dnsneko" | "gleam") => void;
+  onExtendedEdit?: (account: EditorialAccount) => void; onExtendedDelete?: (account: EditorialAccount) => void; onExtendedCheck?: (account: EditorialAccount) => void;
+  checkingAccountId?: number | null;
+  usageByAccount?: Record<number, EditorialAccountUsage>;
 }) {
   const { query, setQuery } = usePageSearch();
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [pages, setPages] = useState<Record<string, number>>({});
-  const providers = [{ id: "dnshe" as const, name: "DNSHE", items: dnshe }, { id: "cloudflare" as const, name: "Cloudflare", items: cloudflare }];
+  const providers = [
+    { id: "dnshe" as const, name: "DNSHE", items: dnshe },
+    { id: "cloudflare" as const, name: "Cloudflare", items: cloudflare },
+    { id: "dnsneko" as const, name: "DNSNEKO", items: extended.filter((item) => item.provider === "dnsneko") },
+    { id: "gleam" as const, name: "GLEAM", items: extended.filter((item) => item.provider === "gleam") },
+  ];
   const normalized = query.trim().toLocaleLowerCase();
   useEffect(() => { setPages({}); setCollapsed(new Set()); }, [query]);
   // Account records only persist a binding. Do not invent a verification status
   // from the presence of a saved key or from a local domain count.
   const readLabel = (usage?: EditorialAccountUsage) => usage?.readLabel || (usage?.readState === "readable" ? "接口快照可读" : usage?.readState === "cached" ? "保留历史快照" : usage?.readState === "error" ? "读取失败" : usage?.verificationLabel || (usage?.verification === "valid" ? "凭据已验证" : usage?.verification === "permission" ? "权限受限" : ""));
   const readFailed = (usage?: EditorialAccountUsage) => usage?.readState === "error" || usage?.verification === "permission";
-  const resourceLabel = (provider: "dnshe" | "cloudflare", usage?: EditorialAccountUsage) => {
+  const providerPurpose: Record<string, string> = { dnshe: "域名 · 助力 · 注册名额", cloudflare: "Zone · DNS · 免费额度", dnsneko: "域名 · 解析 · 批量操作", gleam: "子域名 · 解析记录" };
+  const providerMonogram: Record<string, string> = { dnshe: "D", cloudflare: "C", dnsneko: "N", gleam: "G" };
+  const resourceLabel = (provider: string, usage?: EditorialAccountUsage) => {
     const value = provider === "dnshe" ? usage?.domains : usage?.zones;
     return hasNumber(value) ? number(value) + (provider === "dnshe" ? " 个域名" : " 个 Zone") : "资源未读取";
   };
   return <section className="editorial-view ew-workspace editorial-switchboard" aria-label="账号连接目录">
-    <div className="ew-page-heading"><h2>账号管理</h2><span>{number(dnshe.length + cloudflare.length)} 个绑定账号</span></div>
-    <div className="ew-bind-actions"><button type="button" className="is-primary" onClick={onBindDnshe}>＋ 绑定 DNSHE 账号</button><button type="button" className="is-primary" onClick={onBindCf}>＋ 绑定 Cloudflare 账号</button></div>
+    <div className="ew-page-heading"><h2>账号管理</h2><span>{number(dnshe.length + cloudflare.length + extended.length)} 个绑定账号</span></div>
+    <div className="ew-bind-actions"><button type="button" className="is-primary" onClick={onBindDnshe}>＋ 绑定 DNSHE 账号</button><button type="button" className="is-primary" onClick={onBindCf}>＋ 绑定 Cloudflare 账号</button>{onBindExtended && <button type="button" className="is-primary" onClick={() => onBindExtended("dnsneko")}>＋ 绑定 DNSNEKO 账号</button>}{onBindExtended && <button type="button" className="is-primary" onClick={() => onBindExtended("gleam")}>＋ 绑定 GLEAM 账号</button>}</div>
     {normalized && <div className="ew-directory-tools"><span>按名称筛选「{query}」</span><button type="button" className="ew-quiet-button" onClick={() => setQuery("")}>清除筛选</button></div>}
     <div className="ew-directory-list ew-provider-directory">
       {providers.map((provider) => {
         const filtered = provider.items.filter((item) => matches(item.alias, normalized) || matches(item.api_key, normalized));
         const page = Math.min(pages[provider.id] || 0, Math.max(0, Math.ceil(filtered.length / PAGE_SIZE) - 1));
         const isCollapsed = collapsed.has(provider.id);
+        const usesSnapshot = provider.id === "dnshe" || provider.id === "cloudflare";
         return <section className={"ew-connection-group provider-" + provider.id} key={provider.id}>
-          <button type="button" className="ew-group-toggle ew-provider-heading" aria-expanded={!isCollapsed} onClick={() => setCollapsed((previous) => { const next = new Set(previous); next.has(provider.id) ? next.delete(provider.id) : next.add(provider.id); return next; })}><span className="ew-group-identity"><strong>{provider.name}</strong><small>{number(filtered.length)} 个账号</small></span><span className="ew-provider-purpose">{provider.id === "dnshe" ? "域名 · 助力 · 注册名额" : "Zone · DNS · 免费额度"}</span><span className="ew-disclosure-label">{isCollapsed ? "展开" : "收起"}</span></button>
+          <button type="button" className="ew-group-toggle ew-provider-heading" aria-expanded={!isCollapsed} onClick={() => setCollapsed((previous) => { const next = new Set(previous); next.has(provider.id) ? next.delete(provider.id) : next.add(provider.id); return next; })}><span className="ew-group-identity"><strong>{provider.name}</strong><small>{number(filtered.length)} 个账号</small></span><span className="ew-provider-purpose">{providerPurpose[provider.id]}</span><span className="ew-disclosure-label">{isCollapsed ? "展开" : "收起"}</span></button>
           {!isCollapsed && <><div className="ew-connection-list">{filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE).map((account) => {
             const usage = usageByAccount[account.id];
             return <div className="ew-connection-row" key={account.id}>
-              <div className="ew-connection-select"><span className="ew-account-monogram" aria-hidden="true">{provider.id === "dnshe" ? "D" : "C"}</span><span><strong>{account.alias}</strong><small>{mask(account.api_key)}</small></span></div>
+              <div className="ew-connection-select"><span className="ew-account-monogram" aria-hidden="true">{providerMonogram[provider.id]}</span><span><strong>{account.alias}</strong><small>{mask(account.api_key)}</small></span></div>
               <div className="ew-connection-meta"><span>已绑定</span><small>{fmt(account.created_at)}</small></div>
-              <dl className="ew-connection-evidence">{readLabel(usage) && <div><dt>接口读取</dt><dd className={readFailed(usage) ? "is-danger" : ""}>{readLabel(usage)}</dd></div>}<div><dt>资源快照</dt><dd>{resourceLabel(provider.id, usage)}</dd></div></dl>
-              <div className="ew-row-actions"><button type="button" onClick={() => provider.id === "dnshe" ? onDnsheEdit(account) : onCfEdit(account)}>编辑凭据</button><button type="button" className="is-danger" onClick={() => provider.id === "dnshe" ? onDnsheDelete(account) : onCfDelete(account)}>解绑</button></div>
+              <dl className="ew-connection-evidence">{readLabel(usage) && <div><dt>接口读取</dt><dd className={readFailed(usage) ? "is-danger" : ""}>{readLabel(usage)}</dd></div>}{usesSnapshot ? <div><dt>资源快照</dt><dd>{resourceLabel(provider.id, usage)}</dd></div> : <div><dt>操作范围</dt><dd>{provider.id === "dnsneko" ? "域名与解析" : "子域名与解析"}</dd></div>}</dl>
+              <div className="ew-row-actions">
+                <button type="button" onClick={() => provider.id === "dnshe" ? onDnsheEdit(account) : provider.id === "cloudflare" ? onCfEdit(account) : onExtendedEdit?.(account)}>编辑凭据</button>
+                {!usesSnapshot && <button type="button" disabled={checkingAccountId === account.id} onClick={() => onExtendedCheck?.(account)}>{checkingAccountId === account.id ? "检测中" : "检测连接"}</button>}
+                <button type="button" className="is-danger" onClick={() => provider.id === "dnshe" ? onDnsheDelete(account) : provider.id === "cloudflare" ? onCfDelete(account) : onExtendedDelete?.(account)}>解绑</button>
+              </div>
             </div>;
           })}</div>{filtered.length === 0 && <p className="ew-empty">{normalized ? "没有匹配的账号。" : "尚未绑定 " + provider.name + " 账号。"}</p>}<Pager total={filtered.length} page={page} onChange={(next) => setPages((previous) => ({ ...previous, [provider.id]: next }))} /></>}
         </section>;
@@ -467,9 +483,11 @@ export interface EditorialOverviewProps {
   loading?: boolean;
   refreshing?: boolean;
   domains: EditorialOverviewDomainStats | null;
-  accounts: { dnshe?: number | null; cloudflare?: number | null } | null;
+  accounts: { dnshe?: number | null; cloudflare?: number | null; dnsneko?: number | null; gleam?: number | null } | null;
   dnsheAccountCount: number;
   cloudflareAccountCount: number;
+  dnsnekoAccountCount: number;
+  gleamAccountCount: number;
   quota: { available?: number | null; failed?: number | null; accounts?: EditorialOverviewQuotaRow[] } | null;
   cfAccounts: EditorialOverviewCfAccount[];
   cfUsage: EditorialOverviewCfMetric[];
@@ -549,7 +567,7 @@ export function EditorialOverview(props: EditorialOverviewProps) {
     <div className="dashboard-mode-header"><div><h2 className="text-xl font-semibold tracking-tight text-content-primary">概览</h2><p className="dashboard-kicker">状态 · 比较 · 最近变化</p></div><button type="button" onClick={props.onRefresh} disabled={props.refreshing} aria-label="刷新概览摘要" className="h-10 px-3 rounded border border-border-base text-sm font-medium text-content-secondary hover:bg-hovered inline-flex items-center gap-2" title="读取统计、域名与 CF 最新快照">{props.refreshing ? "读取中…" : "刷新"}</button></div>
     <div className="dashboard-status-rail" aria-label="概览状态摘要"><div><span>可注册名额</span><strong>{overviewCount(props.quota?.available)}</strong></div><div><span>即将到期</span><strong className={domain?.expiring_soon ? "text-amber-600 dark:text-amber-400" : ""}>{overviewCount(domain?.expiring_soon)}</strong></div><div><span>额度未取到</span><strong className={props.quota?.failed ? "text-red-600 dark:text-red-400" : ""}>{overviewCount(props.quota?.failed)}</strong></div><div><span>CF 免费额度</span><strong className={props.cfAccounts.length ? "" : "text-content-muted"}>{props.cfAccounts.length ? `${props.cfAccounts.length} 个账号` : "未读取"}</strong></div></div>
     <section className="overview-domain-composition" aria-label="域名状态"><div className="overview-domain-total"><span>域名状态</span><strong>{overviewCount(domain?.total)}<small> 个域名</small></strong><button type="button" onClick={() => props.onNavigate("domains")}>域名列表</button></div><div className="overview-domain-dimension"><h3>委派 · 共 {overviewCount(domain?.total)} 个</h3><div><OverviewRung label="已委派" value={domain?.delegated} total={domain?.total} /><OverviewRung label="未委派" value={domain?.not_delegated} total={domain?.total} /></div></div><div className="overview-domain-dimension"><h3>生命周期 · 共 {overviewCount(domain?.total)} 个</h3><div><OverviewRung label="活跃" value={domain?.active} total={domain?.total} /><OverviewRung label="已过期" value={domain?.expired} total={domain?.total} tone="danger" /></div></div></section>
-    <div className="overview-identity-strip" aria-label="账号摘要"><button type="button" onClick={() => props.onNavigate("accounts")}><span>DNSHE 账号</span><strong>{overviewCount(accountSummary.dnshe ?? props.dnsheAccountCount)}</strong></button><button type="button" onClick={() => props.onNavigate("accounts")}><span>Cloudflare 账号</span><strong>{overviewCount(accountSummary.cloudflare ?? props.cloudflareAccountCount)}</strong></button></div>
+    <div className="overview-identity-strip" aria-label="账号摘要"><button type="button" onClick={() => props.onNavigate("accounts")}><span>DNSHE 账号</span><strong>{overviewCount(accountSummary.dnshe ?? props.dnsheAccountCount)}</strong></button><button type="button" onClick={() => props.onNavigate("accounts")}><span>Cloudflare 账号</span><strong>{overviewCount(accountSummary.cloudflare ?? props.cloudflareAccountCount)}</strong></button><button type="button" onClick={() => props.onNavigate("accounts")}><span>DNSNEKO 账号</span><strong>{overviewCount(accountSummary.dnsneko ?? props.dnsnekoAccountCount)}</strong></button><button type="button" onClick={() => props.onNavigate("accounts")}><span>GLEAM 账号</span><strong>{overviewCount(accountSummary.gleam ?? props.gleamAccountCount)}</strong></button></div>
     <div className="dashboard-data-grid"><section className="dashboard-data-panel" aria-labelledby="dashboard-data-accounts"><div className="dashboard-data-panel-head"><h3 id="dashboard-data-accounts">账户额度比较</h3><button type="button" className="text-xs text-content-secondary underline underline-offset-4" onClick={() => props.onNavigate("quota")}>查看全部</button></div><div className="dashboard-data-table" role="table" aria-label="账户额度比较"><div className="dashboard-data-row dashboard-data-head" role="row"><span>账号</span><span>已用</span><span>可用</span><span>状态</span></div>{(props.quota?.accounts || []).slice(0, 8).map((account) => { const failed = Boolean(account.error); const ratio = !failed && account.total > 0 ? Math.round(account.used / account.total * 100) : null; return <div className="dashboard-data-row" role="row" key={account.account_id}><span className="truncate" title={account.alias}>{account.alias}</span><span className="tabular-nums">{failed ? "—" : overviewCount(account.used)}</span><span className="tabular-nums">{failed ? "—" : overviewCount(account.available)}</span><span className={failed ? "text-red-600 dark:text-red-400" : ratio !== null && ratio > 85 ? "text-amber-600 dark:text-amber-400" : "text-content-secondary"}>{failed ? "读取失败" : ratio === null ? "未知" : `${ratio}% 已用`}</span></div>; })}{!(props.quota?.accounts || []).length && <p className="p-4 text-sm text-content-muted">暂无账户额度快照</p>}</div></section><OverviewCfAside accounts={props.cfAccounts} usage={props.cfUsage} mode="data" updatedAt={props.cfUpdatedAt} onOpen={() => props.onNavigate("cfquota")} /></div>
     <OverviewRecent recent={props.recent} data onNavigate={props.onNavigate} onOpenDomain={onOpenRecent} formatDate={props.formatDate} />
   </div>;
@@ -557,7 +575,7 @@ export function EditorialOverview(props: EditorialOverviewProps) {
   return <div className="overview-design-workbench" data-mode="design">
     <div className="overview-design-header"><div><span className="dashboard-kicker">资产总览</span><h2 className="text-2xl font-bold text-content-primary">概览</h2><p className="text-content-muted mt-1 text-sm">域名资产、账号容量与最近变化</p></div><div className="overview-design-actions"><label><span>容量列数</span><select value={props.overviewCols} onChange={(event) => props.onOverviewColsChange(event.target.value)} aria-label="概览卡片每行列数">{props.overviewColOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label><button type="button" onClick={props.onRefresh} disabled={props.refreshing} aria-label="刷新概览摘要" title="读取统计、域名与 CF 最新快照">{props.refreshing ? "读取中…" : "刷新"}</button></div></div>
     <div className="overview-design-hero dashboard-detail-grid">
-      <section className="overview-design-asset-track" aria-labelledby="overview-design-assets"><div className="overview-design-asset-heading"><div><span className="dashboard-kicker">资产总览</span><h3 id="overview-design-assets">域名资产主轨</h3></div><button type="button" onClick={() => props.onNavigate("domains")}>打开域名列表</button></div><div className="overview-design-asset-total"><span>托管域名</span><strong>{overviewCount(domain?.total)}</strong><small>{overviewCount(domain?.delegated)} 已委派 · {overviewCount(domain?.active)} 活跃</small></div><div className="overview-design-rails"><OverviewRung label="委派" value={domain?.delegated} total={domain?.total} /><OverviewRung label="生命周期" value={domain?.active} total={domain?.total} /></div><div className="overview-identity-strip" aria-label="账号摘要"><button type="button" onClick={() => props.onNavigate("accounts")}><span>DNSHE 账号</span><strong>{overviewCount(accountSummary.dnshe ?? props.dnsheAccountCount)}</strong></button><button type="button" onClick={() => props.onNavigate("accounts")}><span>Cloudflare 账号</span><strong>{overviewCount(accountSummary.cloudflare ?? props.cloudflareAccountCount)}</strong></button></div><OverviewAssistPanel assist={props.assist} onOpen={() => props.onNavigate("assist")} /><OverviewQuotaPanel props={props} design /></section>
+      <section className="overview-design-asset-track" aria-labelledby="overview-design-assets"><div className="overview-design-asset-heading"><div><span className="dashboard-kicker">资产总览</span><h3 id="overview-design-assets">域名资产主轨</h3></div><button type="button" onClick={() => props.onNavigate("domains")}>打开域名列表</button></div><div className="overview-design-asset-total"><span>托管域名</span><strong>{overviewCount(domain?.total)}</strong><small>{overviewCount(domain?.delegated)} 已委派 · {overviewCount(domain?.active)} 活跃</small></div><div className="overview-design-rails"><OverviewRung label="委派" value={domain?.delegated} total={domain?.total} /><OverviewRung label="生命周期" value={domain?.active} total={domain?.total} /></div><div className="overview-identity-strip" aria-label="账号摘要"><button type="button" onClick={() => props.onNavigate("accounts")}><span>DNSHE 账号</span><strong>{overviewCount(accountSummary.dnshe ?? props.dnsheAccountCount)}</strong></button><button type="button" onClick={() => props.onNavigate("accounts")}><span>Cloudflare 账号</span><strong>{overviewCount(accountSummary.cloudflare ?? props.cloudflareAccountCount)}</strong></button><button type="button" onClick={() => props.onNavigate("accounts")}><span>DNSNEKO 账号</span><strong>{overviewCount(accountSummary.dnsneko ?? props.dnsnekoAccountCount)}</strong></button><button type="button" onClick={() => props.onNavigate("accounts")}><span>GLEAM 账号</span><strong>{overviewCount(accountSummary.gleam ?? props.gleamAccountCount)}</strong></button></div><OverviewAssistPanel assist={props.assist} onOpen={() => props.onNavigate("assist")} /><OverviewQuotaPanel props={props} design /></section>
       <div className="overview-design-context-track">
         <OverviewCfAside accounts={props.cfAccounts} usage={props.cfUsage} mode="design" updatedAt={props.cfUpdatedAt} onOpen={() => props.onNavigate("cfquota")} />
         <OverviewRecent recent={props.recent} onNavigate={props.onNavigate} onOpenDomain={onOpenRecent} formatDate={props.formatDate} />

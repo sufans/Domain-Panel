@@ -63,6 +63,7 @@ import { DataKeyDirectory } from "./DataKeyDirectory";
 import { RegisterHistoryPanel } from "./RegisterHistoryPanel";
 import { DomainCombinationControls, useDomainCheckCache } from "./RuleDomainWorkbench";
 import { DomainCheckCachePanel } from "./DomainCheckResults";
+import { UnifiedPlatformAssets } from "./UnifiedPlatformAssets";
 import { domainCheckOutcomeLabel, domainSequenceCharacters, domainSequenceRange, findReusableDomainCheck, readDomainCheckCache, type DomainCheckOutcome, type ShortDomainCharset } from "./DomainCheckCacheModel";
 import "./source-mapped-views.css";
 import "./mapped-management.css";
@@ -154,8 +155,23 @@ interface Account {
   created_at: string;
 }
 
+type PlatformId = "dnshe" | "cloudflare" | "dnsneko" | "gleam";
+
 
 // ───────────────── 主域新增：概览聚合 / 域名助力 / API 密钥 ─────────────────
+
+/** `/api/platforms` 的元数据；凭证字段与能力矩阵由后端注册表下发。 */
+interface PlatformDefinition {
+  id: PlatformId;
+  name: string;
+  description: string;
+  credentialFields: Array<{ key: string; label: string; secret?: boolean; required: boolean; placeholder?: string }>;
+  capabilities: string[];
+  /** 上游允许的记录类型；缺省表示不限，前端据此收敛类型输入。 */
+  recordTypes?: string[];
+  upstreamHosts: string[];
+  rateLimit: { requests: number; windowSeconds: number };
+}
 
 /** `/api/overview` 返回的聚合数据（全部来自本地缓存，不打扰上游） */
 interface OverviewData {
@@ -169,7 +185,7 @@ interface OverviewData {
     /** 未委派 = 仍走 DNSHE 默认解析 */
     not_delegated: number;
   };
-  accounts: { total: number; dnshe: number; cloudflare: number };
+  accounts: { total: number; dnshe: number; cloudflare: number; dnsneko?: number; gleam?: number };
   quota: {
     total: number;
     used: number;
@@ -905,6 +921,8 @@ export default function App() {
   const [newApiKey, setNewApiKey] = useState("");
   const [newApiSecret, setNewApiSecret] = useState("");
   const [newUsername, setNewUsername] = useState("");
+  // 平台注册表：账号表单的凭证字段与能力提示由后端 /api/platforms 下发
+  const [platformDefinitions, setPlatformDefinitions] = useState<PlatformDefinition[]>([]);
 
   // 批量绑定表单状态
   const [batchInput, setBatchInput] = useState("");
@@ -945,6 +963,8 @@ export default function App() {
   const [editAlias, setEditAlias] = useState("");
   const [editApiKey, setEditApiKey] = useState("");
   const [editApiSecret, setEditApiSecret] = useState("");
+  const [editUsername, setEditUsername] = useState("");
+  const [checkingAccountId, setCheckingAccountId] = useState<number | null>(null);
 
   // 选中的域名与 DNS 记录管理模态框状态
   const [selectedDomain, setSelectedDomain] = useState<Domain | null>(null);
@@ -2346,6 +2366,17 @@ export default function App() {
     }
   };
 
+  // 平台注册表：失败不阻塞账号页，前端保留内置四平台兜底。
+  const fetchPlatforms = async () => {
+    try {
+      const res = await apiFetch("/api/platforms");
+      const data = await res.json();
+      if (data.success && Array.isArray(data.platforms)) setPlatformDefinitions(data.platforms as PlatformDefinition[]);
+    } catch {
+      /* 账号页仍可用内置能力兜底 */
+    }
+  };
+
   // 2.4 获取 Cloudflare 账号的 zone 列表（后端默认排除这些行，需显式传 provider）
   const fetchCfZones = async (accountIdFilter?: string) => {
     setLoadingCfZones(true);
@@ -3240,6 +3271,7 @@ export default function App() {
     cfFetchedAtRef.current = 0;
     fetchAccounts();
     fetchDomains();
+    void fetchPlatforms();
     // CF zones 也随会话拉一次：Cloudflare 标签页要用，域名页的「已在 Cloudflare 管理」
     // 交叉提示也依赖这份列表，不能等用户切到该页才加载
     fetchCfZones();
@@ -3328,6 +3360,37 @@ export default function App() {
     () => accounts.filter((a) => a.provider === "dnshe"),
     [accounts]
   );
+
+  /** 新接入平台（DNSNEKO / GLEAM）的账号；资产走 /api/unified，不进入 D1 快照。 */
+  const unifiedPlatformAccounts = useMemo(
+    () => accounts.filter((a) => a.provider === "dnsneko" || a.provider === "gleam"),
+    [accounts]
+  );
+
+  /** 平台注册表兜底：后端不可用时仍保留四平台的能力门控，避免按钮全被隐藏。 */
+  const effectivePlatformDefinitions = useMemo<PlatformDefinition[]>(() => {
+    const builtin: PlatformDefinition[] = [
+      { id: "dnshe", name: "DNSHE", description: "DNSHE 子域名、解析记录、注册与续期管理",
+        credentialFields: [{ key: "api_key", label: "API Key", required: true }, { key: "api_secret", label: "API Secret", required: true, secret: true }],
+        capabilities: ["domains.read", "records.read", "records.create", "records.update", "records.delete", "domains.register", "domains.renew", "quota.read"],
+        upstreamHosts: ["api005.dnshe.com"], rateLimit: { requests: 55, windowSeconds: 60 } },
+      { id: "cloudflare", name: "Cloudflare", description: "Cloudflare Zone、DNS 记录和账户资源管理",
+        credentialFields: [{ key: "api_token", label: "API Token", required: true, secret: true }],
+        capabilities: ["domains.read", "records.read", "records.create", "records.update", "records.delete", "zones.manage", "quota.read"],
+        upstreamHosts: ["api.cloudflare.com"], rateLimit: { requests: 40, windowSeconds: 60 } },
+      { id: "dnsneko", name: "DNSNEKO", description: "DNSNEKO 域名、解析记录和批量 DNS 操作",
+        credentialFields: [{ key: "username", label: "Username", required: true }, { key: "api_key", label: "API Key", required: true, secret: true }],
+        capabilities: ["domains.read", "records.read", "records.create", "records.update", "records.delete", "records.batch"],
+        upstreamHosts: ["www.dnsneko.com"], rateLimit: { requests: 28, windowSeconds: 60 } },
+      { id: "gleam", name: "GLEAM", description: "GLEAM 子域名和解析记录管理",
+        credentialFields: [{ key: "api_key", label: "API Key", required: true, secret: true, placeholder: "hl6_xxxxxxxxxxxx" }],
+        capabilities: ["domains.read", "records.read", "records.create", "records.update", "records.delete"],
+        recordTypes: ["A", "AAAA", "CNAME", "TXT"],
+        upstreamHosts: ["sld.0n.pub"], rateLimit: { requests: 55, windowSeconds: 60 } }
+    ];
+    if (!platformDefinitions.length) return builtin;
+    return builtin.map((item) => platformDefinitions.find((remote) => remote.id === item.id) || item);
+  }, [platformDefinitions]);
 
   /** 注册目标账号的可用额度口径：未读取或读取失败时保持可选，但明确提示未知。 */
   const registerAccountQuotaOptions = useMemo(() => dnsheAccounts.map((account) => {
@@ -3427,6 +3490,12 @@ export default function App() {
     () => (pageSearchKw ? dnsheAccounts.filter((a) => kwMatch(a.alias, a.api_key)) : dnsheAccounts),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dnsheAccounts, pageSearchKw]
+  );
+
+  const filteredUnifiedAccounts = useMemo(
+    () => (pageSearchKw ? unifiedPlatformAccounts.filter((a) => kwMatch(a.alias, a.api_key)) : unifiedPlatformAccounts),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [unifiedPlatformAccounts, pageSearchKw]
   );
 
   // 「API 密钥」页：进入页面或切换视图口径时取数。
@@ -3867,6 +3936,22 @@ export default function App() {
     setEditAlias(acc.alias);
     setEditApiKey("");
     setEditApiSecret("");
+    setEditUsername("");
+  };
+
+  /** 账号连接检测：只读调用上游 verify，不写入任何业务数据。 */
+  const handleCheckAccount = async (id: number) => {
+    setCheckingAccountId(id);
+    try {
+      const res = await apiFetch(`/api/accounts/${id}/check`, { method: "POST" });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message || "连接检测失败");
+      showToast("success", `连接正常：${data.alias || "账号"}`);
+    } catch (error) {
+      showToast("error", error instanceof Error ? error.message : "连接检测失败");
+    } finally {
+      setCheckingAccountId(null);
+    }
   };
 
   // 提交修改账号（可仅改别名，或同时更换 API Key/Secret）
@@ -3876,23 +3961,44 @@ export default function App() {
       showToast("error", "账户别名不能为空");
       return;
     }
-    if (Boolean(editApiKey.trim()) !== Boolean(editApiSecret.trim())) {
+    const editingPlatform = editingAccount.provider || "dnshe";
+    const changedFields = [editUsername, editApiKey, editApiSecret].filter((value) => value.trim()).length;
+    if (editingPlatform === "dnshe" && Boolean(editApiKey.trim()) !== Boolean(editApiSecret.trim())) {
       showToast("error", "更换 API 密钥时，API Key 与 API Secret 需同时填写（留空则保持不变）");
+      return;
+    }
+    if (editingPlatform === "dnsneko" && changedFields > 0 && changedFields < 2) {
+      showToast("error", "更换 DNSNEKO 凭证时，Username 与 API Key 需同时填写");
       return;
     }
     setActionLoading(`update-account-${editingAccount.id}`);
     const accountId = editingAccount.id;
     try {
       const body: Record<string, string> = { alias: editAlias.trim() };
-      const keyChanged = Boolean(editApiKey.trim() && editApiSecret.trim());
+      const keyChanged = editingPlatform === "cloudflare"
+        ? Boolean(editApiSecret.trim())
+        : editingPlatform === "dnsneko"
+          ? Boolean(editUsername.trim() && editApiKey.trim())
+          : editingPlatform === "gleam"
+            ? Boolean(editApiKey.trim() || editApiSecret.trim())
+            : Boolean(editApiKey.trim() && editApiSecret.trim());
       if (keyChanged) {
-        body.api_key = editApiKey.trim();
-        body.api_secret = editApiSecret.trim();
+        if (editingPlatform === "cloudflare") {
+          body.api_token = editApiSecret.trim();
+        } else if (editingPlatform === "dnsneko") {
+          body.username = editUsername.trim();
+          body.api_key = editApiKey.trim();
+        } else if (editingPlatform === "gleam") {
+          body.api_key = (editApiSecret.trim() || editApiKey.trim());
+        } else {
+          body.api_key = editApiKey.trim();
+          body.api_secret = editApiSecret.trim();
+        }
       }
 
       // 换 Key 会触发后台重新深度同步，先记下当前指纹作为「同步已生效」的对照基线
       const baseline = new Map<number, string>();
-      if (keyChanged) {
+      if (keyChanged && (editingPlatform === "dnshe" || editingPlatform === "cloudflare")) {
         const current = await readAccountDomainFingerprint(accountId);
         if (current !== null) baseline.set(accountId, current);
       }
@@ -3906,12 +4012,15 @@ export default function App() {
       if (data.success) {
         showToast("success", data.message || "账号信息已更新");
         setEditingAccount(null);
-        fetchAccounts();
+        await fetchAccounts();
         if (keyChanged) {
           // 只改别名时后端不会重新同步域名，没必要轮询
-          waitForAccountDomainSync([accountId], "API 密钥已更换", baseline);
+          if (editingPlatform === "dnshe" || editingPlatform === "cloudflare") {
+            waitForAccountDomainSync([accountId], "API 密钥已更换", baseline);
+          }
         } else {
           fetchDomains();
+          void fetchPlatforms();
           // 后端已就地改掉配额缓存里的别名，刷新一次让配额页的标题跟上
           invalidateQuotaTabCache();
           fetchQuotas();
@@ -6884,7 +6993,7 @@ export default function App() {
     { key: "domains", label: "域名列表", icon: <Globe className="w-5 h-5" />, badge: domains.length },
     { key: "cloudflare", label: "Cloudflare", icon: <Cloud className="w-5 h-5" />, badge: cfZones.length },
     { key: "assist", label: "域名助力", icon: <Gift className="w-5 h-5" />, badge: overview?.assist?.assist_remaining },
-    { key: "accounts", label: "账号管理", icon: <Key className="w-5 h-5" />, badge: dnsheAccounts.length },
+    { key: "accounts", label: "账号管理", icon: <Key className="w-5 h-5" />, badge: accounts.length },
     { key: "apikeys", label: "API 密钥", icon: <Lock className="w-5 h-5" /> },
     { key: "register", label: "注册 / 查重", icon: <Plus className="w-5 h-5" /> },
     { key: "quota", label: "账户配额", icon: <Database className="w-5 h-5" /> },
@@ -6963,7 +7072,7 @@ export default function App() {
       total: domains.length,
       active,
       expired,
-      accounts: dnsheAccounts.length,
+      accounts: accounts.length,
       recent,
     };
   }, [domains, accounts]);
@@ -7460,6 +7569,8 @@ export default function App() {
             accounts={overview?.accounts || null}
             dnsheAccountCount={dnsheAccounts.length}
             cloudflareAccountCount={cfAccounts.length}
+            dnsnekoAccountCount={unifiedPlatformAccounts.filter((a) => a.provider === "dnsneko").length}
+            gleamAccountCount={unifiedPlatformAccounts.filter((a) => a.provider === "gleam").length}
             quota={overview?.quota || null}
             cfAccounts={cfQuota}
             cfUsage={overviewCfUsage}
@@ -9123,7 +9234,7 @@ export default function App() {
                       <button onClick={() => setGlobalSearch("")} className="ml-0.5 font-semibold underline decoration-dotted hover:text-amber-900 dark:hover:text-amber-200">清除</button>
                     </span>
                   )}
-                  <span>已绑定账户: <span className="text-primary font-bold">{dnsheAccounts.length}</span></span>
+                  <span>已绑定账户: <span className="text-primary font-bold">{dnsheAccounts.length}</span>{unifiedPlatformAccounts.length > 0 ? ` + ${unifiedPlatformAccounts.length} 个平台账号` : ""}</span>
                   <span>托管域名: <span className="text-emerald-400 font-bold">{domains.length}</span> 个</span>
                   {/* 第24轮E：数据新鲜度 —— 域名列表读的是 D1 快照，得让人知道数据有多新 */}
                   <span className="inline-flex items-center gap-1.5">
@@ -9459,6 +9570,16 @@ export default function App() {
               </div>
             ))}
           </div>
+        )}
+
+        {/* DNSNEKO / GLEAM 实时资产：不走 D1 快照，直接读上游；能力按钮由注册表门控。 */}
+        {activeTab === "domains" && unifiedPlatformAccounts.length > 0 && (
+          <UnifiedPlatformAssets
+            accounts={unifiedPlatformAccounts}
+            definitions={effectivePlatformDefinitions.filter((item) => item.id === "dnsneko" || item.id === "gleam")}
+            apiFetch={apiFetch}
+            onToast={showToast}
+          />
         )}
 
         </div>
@@ -10164,6 +10285,7 @@ export default function App() {
               <EditorialAccountSwitchboard
                 dnshe={filteredDnsheAccounts}
                 cloudflare={filteredCfAccounts}
+                extended={filteredUnifiedAccounts.map((account) => ({ id: account.id, alias: account.alias, api_key: account.api_key, created_at: account.created_at, provider: account.provider }))}
                 usageByAccount={Object.fromEntries([
                   ...dnsheAccounts.map((account) => {
                     const quota = quotas.find((item) => item.account_id === account.id);
@@ -10184,6 +10306,11 @@ export default function App() {
                 onCfDelete={(account) => void handleCfDeleteAccount(account as Account)}
                 onBindDnshe={() => { setBindProvider("dnshe"); setBindMode("single"); setBindModalOpen(true); }}
                 onBindCf={() => { setBindProvider("cloudflare"); setBindMode("single"); setBindModalOpen(true); }}
+                onBindExtended={(platform) => { setBindProvider(platform); setBindMode("single"); setBindModalOpen(true); }}
+                onExtendedEdit={(account) => openEditAccount(accounts.find((item) => item.id === account.id) || (account as Account))}
+                onExtendedDelete={(account) => void handleDeleteAccount(account.id)}
+                onExtendedCheck={(account) => void handleCheckAccount(account.id)}
+                checkingAccountId={checkingAccountId}
               />
             )}
             {dataStyle && <div className={`space-y-6 mapped-accounts mapped-accounts--${accountView}`} data-source={accountView === "cards" ? "v2026.10.15" : "preview2-data"}>
@@ -10212,6 +10339,23 @@ export default function App() {
               >
                 <Cloud className="w-5 h-5" />
                 绑定 Cloudflare 账号
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => { setBindProvider("dnsneko"); setBindMode("single"); setBindModalOpen(true); }}
+                className="py-3 rounded text-sm font-semibold border flex items-center justify-center gap-2 transition-all bg-elevated hover:bg-hovered text-content-secondary border-border-base"
+              >
+                <Plus className="w-5 h-5" /> 绑定 DNSNEKO 账号
+              </button>
+              <button
+                type="button"
+                onClick={() => { setBindProvider("gleam"); setBindMode("single"); setBindModalOpen(true); }}
+                className="py-3 rounded text-sm font-semibold border flex items-center justify-center gap-2 transition-all bg-elevated hover:bg-hovered text-content-secondary border-border-base"
+              >
+                <Plus className="w-5 h-5" /> 绑定 GLEAM 账号
               </button>
             </div>
 
@@ -10327,6 +10471,61 @@ export default function App() {
                 </div>
               )}
             </div>
+
+            {/* DNSNEKO / GLEAM 账号：与上面两组同样列数，避免右侧空出一列 */}
+            {unifiedPlatformAccounts.length > 0 && (
+              <div>
+                <h2 className="text-lg font-bold text-content-primary mb-4 flex items-center gap-2">
+                  <Server className="w-5 h-5 text-primary" /> DNSNEKO / GLEAM 账号 ({unifiedPlatformAccounts.length})
+                </h2>
+                <div className={`account-collection grid grid-cols-1 ${accountView === "list" ? "gap-0 border border-border-base rounded overflow-hidden" : "md:grid-cols-2 gap-4"}`}>
+                  {filteredUnifiedAccounts.map((acc) => (
+                    <div key={acc.id} className={`account-record bg-surface border-border-base flex justify-between ${accountView === "list" ? "p-4 items-center gap-2 border-b last:border-b-0" : "rounded p-5 border items-start gap-4 shadow-sm"}`}>
+                      <div className="account-identity min-w-0">
+                        <h3 className={`font-bold text-content-primary truncate flex items-center gap-2 ${accountView === "list" ? "text-sm" : "text-base"}`}>
+                          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded border border-border-base text-content-muted flex-shrink-0">
+                            {acc.provider === "dnsneko" ? "DNSNEKO" : "GLEAM"}
+                          </span>
+                          <span className="truncate">{acc.alias}</span>
+                        </h3>
+                        <p className={`text-content-muted text-xs font-mono break-all ${accountView === "list" ? "mt-0.5" : "mt-1.5"}`}>
+                          {maskApiKey(acc.api_key)}
+                        </p>
+                        <p className={`text-[11px] text-content-muted ${accountView === "list" ? "mt-0.5" : "mt-2"}`}>
+                          绑定于: {new Date(acc.created_at).toLocaleString("zh-CN")}
+                        </p>
+                      </div>
+                      <div className={`flex flex-shrink-0 ${accountView === "list" ? "items-center gap-1" : "flex-col gap-2"}`}>
+                        <button
+                          onClick={() => void handleCheckAccount(acc.id)}
+                          disabled={checkingAccountId === acc.id}
+                          className={`p-2 rounded transition-colors disabled:opacity-50 ${accountView === "list" ? "hover:bg-hovered text-content-muted hover:text-content-primary" : "bg-primary-soft hover:bg-hovered text-primary border border-border-base"}`}
+                          title="检测连接"
+                        >
+                          <RefreshCw className={`w-4 h-4 ${checkingAccountId === acc.id ? "animate-spin" : ""}`} />
+                        </button>
+                        <button
+                          onClick={() => openEditAccount(acc)}
+                          disabled={actionLoading === `update-account-${acc.id}`}
+                          className={`p-2 rounded transition-colors disabled:opacity-50 ${accountView === "list" ? "hover:bg-hovered text-content-muted hover:text-content-primary" : "bg-primary-soft hover:bg-hovered text-primary border border-border-base"}`}
+                          title="修改账号"
+                        >
+                          <Pencil className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={() => handleDeleteAccount(acc.id)}
+                          disabled={actionLoading === `delete-account-${acc.id}`}
+                          className={`p-2 rounded transition-colors disabled:opacity-50 ${accountView === "list" ? "hover:bg-hovered text-content-muted hover:text-red-500" : "bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 dark:bg-red-950/60 dark:hover:bg-red-900/60 dark:text-red-400 dark:border-red-900/50"}`}
+                          title="删除账号"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             </div>}
           </>
         )}
@@ -10340,6 +10539,9 @@ export default function App() {
               <div className="bg-elevated px-4 sm:px-6 py-4 flex items-center justify-between border-b border-border-base flex-shrink-0">
                 <h3 className="text-lg font-bold text-content-primary flex items-center gap-1.5">
                   <Settings className="w-5 h-5 text-primary" /> 修改账号
+                  <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded border border-border-base text-content-muted">
+                    {({ dnshe: "DNSHE", cloudflare: "Cloudflare", dnsneko: "DNSNEKO", gleam: "GLEAM" } as Record<string, string>)[editingAccount.provider || "dnshe"]}
+                  </span>
                 </h3>
                 <button
                   onClick={() => setEditingAccount(null)}
@@ -10374,32 +10576,99 @@ export default function App() {
                     className="w-full form-input px-3 h-10 rounded text-sm text-content-secondary"
                   />
                 </div>
-                <div>
-                  <label className="block text-xs font-semibold text-content-muted mb-1.5">API Key（留空保持不变）</label>
-                  <input
-                    type="text"
-                    name="dnshe-edit-api-key"
-                    autoComplete="off"
-                    value={editApiKey}
-                    onChange={(e) => setEditApiKey(e.target.value)}
-                    placeholder={`当前: ${maskApiKey(editingAccount.api_key)}`}
-                    className="w-full form-input px-3 h-10 rounded text-sm text-content-secondary"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-content-muted mb-1.5">API Secret（留空保持不变）</label>
-                  <PasswordInput
-                    name="dnshe-edit-api-secret"
-                    autoComplete="new-password"
-                    value={editApiSecret}
-                    onChange={setEditApiSecret}
-                    placeholder="如需更换密钥则填写新的 API Secret"
-                    className="w-full form-input px-3 h-10 rounded text-sm text-content-secondary"
-                  />
-                </div>
-                <p className="text-[11px] text-content-muted leading-relaxed">
-                  仅修改别名时无需填写密钥；更换 API Key/Secret 会校验新密钥有效性，并自动重新同步该账号的域名缓存。
-                </p>
+                {(editingAccount.provider || "dnshe") === "dnsneko" ? (
+                  <>
+                    <div>
+                      <label className="block text-xs font-semibold text-content-muted mb-1.5">Username（留空保持不变）</label>
+                      <input
+                        type="text"
+                        name="dnsneko-edit-username"
+                        autoComplete="off"
+                        value={editUsername}
+                        onChange={(e) => setEditUsername(e.target.value)}
+                        placeholder="新的 DNSNEKO 用户名"
+                        className="w-full form-input px-3 h-10 rounded text-sm text-content-secondary"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-content-muted mb-1.5">API Key（留空保持不变）</label>
+                      <PasswordInput
+                        name="dnsneko-edit-api-key"
+                        autoComplete="new-password"
+                        value={editApiKey}
+                        onChange={setEditApiKey}
+                        placeholder="新的 DNSNEKO API Key"
+                        className="w-full form-input px-3 h-10 rounded text-sm text-content-secondary font-mono"
+                      />
+                    </div>
+                    <p className="text-[11px] text-content-muted leading-relaxed">
+                      仅修改别名时无需填写凭据；更换时必须同时填写 Username 与 API Key，并先通过上游校验。
+                    </p>
+                  </>
+                ) : (editingAccount.provider || "dnshe") === "gleam" ? (
+                  <>
+                    <div>
+                      <label className="block text-xs font-semibold text-content-muted mb-1.5">API Key（留空保持不变）</label>
+                      <PasswordInput
+                        name="gleam-edit-api-key"
+                        autoComplete="new-password"
+                        value={editApiSecret}
+                        onChange={setEditApiSecret}
+                        placeholder="新的 GLEAM API Key（hl6_…）"
+                        className="w-full form-input px-3 h-10 rounded text-sm text-content-secondary font-mono"
+                      />
+                    </div>
+                    <p className="text-[11px] text-content-muted leading-relaxed">
+                      GLEAM 只需 API Key；留空仅修改别名，填写后会先调用 /user/info 校验有效性。
+                    </p>
+                  </>
+                ) : (editingAccount.provider || "dnshe") === "cloudflare" ? (
+                  <>
+                    <div>
+                      <label className="block text-xs font-semibold text-content-muted mb-1.5">API Token（留空保持不变）</label>
+                      <PasswordInput
+                        name="cf-edit-api-token"
+                        autoComplete="new-password"
+                        value={editApiSecret}
+                        onChange={setEditApiSecret}
+                        placeholder="新的 Cloudflare API Token"
+                        className="w-full form-input px-3 h-10 rounded text-sm text-content-secondary font-mono"
+                      />
+                    </div>
+                    <p className="text-[11px] text-content-muted leading-relaxed">
+                      仅修改别名时无需填写 Token；更换后会重新校验 Token 并同步该账号的 Zone 缓存。
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <div>
+                      <label className="block text-xs font-semibold text-content-muted mb-1.5">API Key（留空保持不变）</label>
+                      <input
+                        type="text"
+                        name="dnshe-edit-api-key"
+                        autoComplete="off"
+                        value={editApiKey}
+                        onChange={(e) => setEditApiKey(e.target.value)}
+                        placeholder={`当前: ${maskApiKey(editingAccount.api_key)}`}
+                        className="w-full form-input px-3 h-10 rounded text-sm text-content-secondary"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-content-muted mb-1.5">API Secret（留空保持不变）</label>
+                      <PasswordInput
+                        name="dnshe-edit-api-secret"
+                        autoComplete="new-password"
+                        value={editApiSecret}
+                        onChange={setEditApiSecret}
+                        placeholder="如需更换密钥则填写新的 API Secret"
+                        className="w-full form-input px-3 h-10 rounded text-sm text-content-secondary"
+                      />
+                    </div>
+                    <p className="text-[11px] text-content-muted leading-relaxed">
+                      仅修改别名时无需填写密钥；更换 API Key/Secret 会校验新密钥有效性，并自动重新同步该账号的域名缓存。
+                    </p>
+                  </>
+                )}
 
                 <div className="flex gap-2 pt-1">
                   <button

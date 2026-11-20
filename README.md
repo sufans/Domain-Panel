@@ -1,11 +1,11 @@
-# 🌐 DNSHE-Panel
+# 🌐 Domain-Panel
 
-> DNSHE 多账号域名集控面板 —— 面向多账号、批量域名和 Cloudflare 资源管理的集中式工作台。
+> 多平台 DNS 聚合管理面板 —— 统一管理 DNSHE、Cloudflare、DNSNEKO 与 GLEAM 的账号、域名与解析记录。
 
 [![构建自建镜像](https://github.com/shiranzby/DNSHE-Panel/actions/workflows/docker.yml/badge.svg)](https://github.com/shiranzby/DNSHE-Panel/actions/workflows/docker.yml)
 [![许可证: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-DNSHE-Panel 基于 [lioil522/dnshe-manager](https://github.com/lioil522/dnshe-manager) 二次开发。上游已经提供了域名资产看板、Cloudflare 管理、定时同步与续期、通知推送和自建版 Node 适配；本仓库在它之上补齐了概览页指标卡与账户配额、域名注册查重、运行日志、API 密钥集中管理、域名助力与助力记录、**一键委派到 Cloudflare**，并修掉了一批请求竞态与健壮性问题。同一套后端代码同时支持 **Cloudflare Workers** 与 **Docker 自建** 两种部署形态。
+Domain-Panel 基于 [lioil522/dnshe-manager](https://github.com/lioil522/dnshe-manager) 二次开发。上游已经提供了域名资产看板、Cloudflare 管理、定时同步与续期、通知推送和自建版 Node 适配；本仓库在它之上补齐了概览页指标卡与账户配额、域名注册查重、运行日志、API 密钥集中管理、域名助力与助力记录、**一键委派到 Cloudflare**，并将平台调用重构为代码插件注册机制，统一接入 **DNSHE / Cloudflare / DNSNEKO / GLEAM** 四个平台。同一套后端代码同时支持 **Cloudflare Workers** 与 **Docker 自建** 两种部署形态。
 
 **当前版本：设计、数据、卡片三种平级画风。** 可按页面保存偏好，共享顶栏搜索与业务状态；同时完善资产检查器、注册查重、API 密钥工作面、Cloudflare 逐项读取诊断，并新增独立的自动续期工作页。注册成功后的列表同步和续期结果都保留明确的最终一致性与失败语义，不把旧缓存或未知日期伪装成新成功。
 
@@ -56,15 +56,18 @@ DNSHE-Panel 基于 [lioil522/dnshe-manager](https://github.com/lioil522/dnshe-ma
 
 ### 资产管理
 
-- **多账号管理** — 绑定多个 DNSHE API Key，跨账号统一管理；支持单条与批量粘贴（逐行 `Key Secret`、逗号/空格/Tab 分隔，亦兼容 JSON 数组）
-- **域名列表** — 按账号分组折叠，支持账号筛选与「系统默认 / 外部 DNS」类型筛选；每张卡直接显示注册/到期时间、当前 DNS 服务商、认证状态；账号徽章给出「共 N 个域名（系统默认: x | 外部DNS: y）」的分布
+- **多平台账号管理** — 统一绑定 DNSHE、Cloudflare、DNSNEKO 与 GLEAM 账号；平台选项、凭证字段和能力说明由 `/api/platforms` 动态生成，后续新增平台只需注册适配器，前端自动适配。支持单条与批量绑定（DNSHE / Cloudflare 逐行粘贴，DNSNEKO 逐行 `Username APIKey`，GLEAM 逐行 `APIKey`）
+- **域名列表** — DNSHE / Cloudflare 域名按账号分组折叠，支持账号筛选与「系统默认 / 外部 DNS」类型筛选；DNSNEKO / GLEAM 域名通过实时资产卡片展示，支持按平台与账号筛选。每张卡直接显示注册/到期时间、当前 DNS 服务商、认证状态；账号徽章给出「共 N 个域名（系统默认: x | 外部DNS: y）」的分布
 - **概览看板** — 域名资产、账号与助力、账户配额、CF 免费额度与最近注册按画风重组；设计风采用主辅轨道，避免短卡被强行拉高填空
 - **账户配额** — 顶部汇总全部账号，下面保留每个子账号的基础额度、邀请加成、已用与可用配额；支持筛选和按需隐藏账号
+- **平台能力矩阵** — 每个平台声明支持的操作（记录 CRUD、批量操作、Zone 管理、配额读取等）；不支持的能力前端自动隐藏按钮，不靠点击后报错来暴露差异
 
 ### 解析与 Cloudflare
 
 - **DNS 解析管理** — 面板内增删改 DNS 记录（A / AAAA / CNAME / MX / TXT 等），支持批量添加与批量修改
 - **解析线路** — 识别支持按线路解析的根域，行内选择线路
+- **DNSNEKO 记录** — 支持全部记录类型，保留主机、TTL、线路与优先级字段；支持批量删除、启用/暂停、TTL 与线路修改
+- **GLEAM 记录** — 类型限 `A / AAAA / CNAME / TXT`（前端下拉自动裁剪），TTL 由服务商自动决定，记录类型创建后不可改；不支持服务端批量操作，前端提示逐条处理
 - **Cloudflare 管理** — 独立标签页绑定 Cloudflare 账号（绑定即在线校验 Token、别名自动取账号名），自动同步 zones；zone 卡支持全部记录类型的增删改与批量操作、橙色云代理开关、控制台深链
 - **跨站交叉提示** — DNSHE 域名若 NS 已指向 Cloudflare 且已绑定账号，一键跳转定位到对应的 zone 解析面板
 - **一键委派到 Cloudflare** — 面板内直接为该域名创建 Cloudflare zone，并把 Cloudflare 分配的两条 NS 写回 DNSHE 完成委派；**先完成委派，再把待迁移的解析记录列出来让你逐条勾选确认**，不会自动搬运解析。仅对已列入 Public Suffix List 的根域开放（`us.ci` / `cc.cd` / `de5.net` / `ccwu.cc`），其余根域的菜单项置灰并当场写明原因
@@ -101,23 +104,23 @@ DNSHE-Panel 基于 [lioil522/dnshe-manager](https://github.com/lioil522/dnshe-ma
 
 ```mermaid
 graph TD
-    subgraph DNSHE-Panel
+    subgraph Domain-Panel
         subgraph 前端 SPA
             A1["React 18 + TypeScript"]
             A2["Vite + Tailwind CSS"]
-            A3["App.tsx 主应用 + 词库/规则/地理数据模块"]
+            A3["App.tsx 主应用 + UnifiedPlatformAssets"]
         end
 
         subgraph 后端 Hono
             B1["src/index.ts — 路由与业务"]
             B2["src/db.ts — 数据层（加密 / 鉴权 / CRUD）"]
             B3["src/cron.ts — 定时同步与续期 / 通知推送"]
-            B4["src/dnshe.ts — DNSHE API 客户端"]
-            B5["src/cloudflare.ts — CF API v4 客户端"]
+            B4["src/platforms/registry.ts — 平台注册表与能力矩阵"]
+            B5["src/platforms/adapters/* — 四平台适配器"]
             B6["src/dns-provider.ts — DNS 托管商识别（DoH）"]
         end
 
-        A1 -->|Bearer Token| B1
+        A1 -->|Bearer Token + /api/platforms| B1
     end
 
     B1 --> C1
@@ -133,7 +136,7 @@ graph TD
     end
 
     subgraph 上游
-        C3["DNSHE REST API / Cloudflare API v4 / DoH 解析"]
+        C3["DNSHE API / Cloudflare API v4 / DNSNEKO API / GLEAM API / DoH 解析"]
     end
 ```
 
@@ -276,13 +279,17 @@ docker compose up -d
 ## 📁 项目结构
 
 ```
-DNSHE-Panel/
+Domain-Panel/
 ├── src/                        # 共享业务代码（Workers 与自建版共用）
 │   ├── index.ts                #   Hono 路由与 API 处理（含鉴权中间件）
 │   ├── db.ts                   #   数据库管理器（加密、鉴权、CRUD、缓存）
 │   ├── cron.ts                 #   定时同步与续期、Webhook/SMTP/Telegram 推送
 │   ├── dnshe.ts                #   DNSHE API 客户端
 │   ├── cloudflare.ts           #   Cloudflare API v4 客户端（zone 与解析记录）
+│   ├── platforms/              #   多平台适配器（DNSHE / Cloudflare / DNSNEKO / GLEAM）
+│   │   ├── registry.ts         #     平台注册表：名称、凭证字段、能力矩阵、限流与上游主机
+│   │   ├── types.ts            #     统一 DTO 与 PlatformAdapter 合同
+│   │   └── adapters/           #     各平台适配器实现
 │   ├── cfusage.ts              #   CF 用量采集、逐项诊断与快照合并
 │   ├── dns-provider.ts         #   DNS 托管商识别（DoH）+ 增量复核计划（planDnsChecks）与有界并发
 │   └── punycode.ts             #   国际化域名编码
@@ -300,11 +307,13 @@ DNSHE-Panel/
 │   │   ├── InterfaceStyle.tsx  #   三画风、全局默认与逐页偏好
 │   │   ├── PageSearch.tsx      #   顶栏搜索与各页独立关键词
 │   │   ├── EditorialViews.tsx / FlowWorkspaces.tsx
+│   │   ├── UnifiedPlatformAssets.tsx  # DNSNEKO / GLEAM 实时资产与记录面板
 │   │   ├── AssetCollection.tsx / QuotaCollection.tsx
 │   │   ├── CfQuotaPage.tsx / CfQuotaModel.ts / CfCharts.tsx
 │   │   ├── rulegen.ts          #   查重规则解析与候选生成
 │   │   ├── wordbanks.ts        #   可编辑词库
 │   │   ├── dnsrecords.ts       #   DNS 记录类型定义
+│   │   ├── demo-api.ts          #   静态演示合成 API（含四平台样本）
 │   │   ├── geodata.ts / zipcodes.ts / pinyin.ts / enwords.ts
 │   │   └── punycode.ts         #   前端侧 Punycode
 │   ├── public/_headers         #   静态资源安全响应头
@@ -386,6 +395,8 @@ npm run start:node
 模型、服务端采集与 Node 适配测试无需登录：
 
 ```bash
+npm run test:platforms
+npm run test:platforms:contracts
 npm run test:quota
 npm run test:usage:backend
 npm run test:cf:permissions
@@ -616,6 +627,11 @@ Cloudflare 用 Public Suffix List（PSL）区分「可注册的根域」与「�
 
 本项目的整体骨架来自 [lioil522/dnshe-manager](https://github.com/lioil522/dnshe-manager)：Hono 路由、数据层、DNSHE / Cloudflare 客户端、定时同步与续期、通知推送、自建版 Node 适配，以及 Dockerfile 与 CI 工作流。
 
+多平台聚合能力的 API 参考来源：
+
+- [DNSNEKO](https://www.dnsneko.com/) — 域名列表、解析记录与批量 DNS 操作接口
+- [GLEAM](https://sld.0n.pub/) — 子域名认领、DNS 记录与幂等写操作接口
+
 本仓库在其之上做的增量：
 
 - 概览页指标卡重做，账户配额与失败数展示
@@ -626,6 +642,7 @@ Cloudflare 用 Public Suffix List（PSL）区分「可注册的根域」与「�
 - API 密钥集中管理（表格化与增量缓存）
 - 域名助力与助力记录（并行化、排除名单）
 - 一键委派域名到 Cloudflare（先委派、后列出记录让用户确认；仅对 PSL 内的根域开放）
+- 多平台 DNS 聚合管理：平台注册表、统一 DTO、DNSNEKO / GLEAM 适配器与能力矩阵门控
 - Worker 子请求预算与定时同步的轮转调度
 - 一批请求竞态、可选链空值与数值解析的健壮性修复
 

@@ -16,8 +16,8 @@ import { computeDnsState } from "./dns-provider";
 import type { DnsState } from "./dns-provider";
 import { toASCII } from "./punycode";
 import "./platforms";
-import { getPlatformAdapter, getPlatformDefinition, listPlatformDefinitions } from "./platforms";
-import type { PlatformId } from "./platforms";
+import { getPlatformAdapter, getPlatformDefinition, listPlatformDefinitions, PlatformError } from "./platforms";
+import type { PlatformCapability, PlatformId } from "./platforms";
 
 /**
  * 统一成功响应封装 — 将 payload 扁平化后附加 success: true，
@@ -1111,13 +1111,17 @@ app.put("/api/accounts/:id", async (c) => {
 
     const existingAccount = (await dbManager.getAccounts()).find((account) => account.id === id);
     if (!existingAccount) return c.json(errorRes(`未找到 ID 为 ${id} 的账户`, "not_found"), 404);
+    // DB 层统一按 (别名, 主字段, 密钥) 更新：
+    //   DNSNEKO：primary = Username，secret = API Key；
+    //   GLEAM：primary = API Key（编辑时前端放在 api_secret 或 api_key 均可）；
+    //   DNSHE / Cloudflare：保持既有 api_key + (api_secret | api_token) 语义。
     const updatePrimary = existingAccount.provider === "dnsneko"
       ? (body.username !== undefined ? String(body.username) : undefined)
       : apiKey;
     const updateSecret = existingAccount.provider === "dnsneko"
       ? apiKey
       : existingAccount.provider === "gleam"
-        ? (apiKey !== undefined ? apiKey : undefined)
+        ? (apiKey ?? apiSecret)
         : apiToken ?? apiSecret;
     const updatedAccount = await dbManager.updateAccount(id, alias, updatePrimary, updateSecret);
 
@@ -1161,19 +1165,63 @@ app.get("/api/unified/domains", async (c) => {
   const requestedProvider = c.req.query("provider");
   const requestedAccount = Number(c.req.query("account_id"));
   try {
+    if (requestedProvider) getPlatformDefinition(requestedProvider);
     const accounts = await dbManager.getAccounts();
     const selected = accounts.filter((account) =>
       (!requestedProvider || account.provider === requestedProvider) &&
       (!Number.isFinite(requestedAccount) || requestedAccount <= 0 || account.id === requestedAccount)
     );
-    const domains = (await Promise.all(selected.map(async (account) => {
-      const auth = await dbManager.getPlatformCredentials(account.id);
-      return getPlatformAdapter(auth.provider).listDomains(auth.credentials, account.id, account.alias);
-    }))).flat();
-    return c.json(successRes({ domains, live: true, generated_at: new Date().toISOString() }));
+    // 单个平台失败不能拖垮整张聚合表：按账号捕获错误并随响应返回，
+    // 前端既能看到其余平台的资产，也能定位是哪个账号读取失败。
+    const results = await Promise.all(selected.map(async (account) => {
+      try {
+        const auth = await dbManager.getPlatformCredentials(account.id);
+        return {
+          domains: await getPlatformAdapter(auth.provider).listDomains(auth.credentials, account.id, account.alias),
+          error: null
+        };
+      } catch (error) {
+        return {
+          domains: [],
+          error: {
+            accountId: account.id,
+            alias: account.alias,
+            platform: account.provider,
+            message: error instanceof Error ? error.message : "读取平台域名失败"
+          }
+        };
+      }
+    }));
+    return c.json(successRes({
+      domains: results.flatMap((result) => result.domains),
+      errors: results.map((result) => result.error).filter(Boolean),
+      accounts: selected.map((account) => ({ id: account.id, alias: account.alias, platform: account.provider })),
+      live: true,
+      generated_at: new Date().toISOString()
+    }));
   } catch (error) {
-    const message = error instanceof Error ? error.message : "聚合平台域名失败";
-    return c.json(errorRes(message, "platform_aggregate_failed"), 502);
+    return platformFailure(c, error, "聚合平台域名失败", "platform_aggregate_failed");
+  }
+});
+
+/** 账号连接检测：只做只读校验，不写日志里的凭据，也不返回任何 Secret。 */
+app.post("/api/accounts/:id/check", async (c) => {
+  const dbManager = c.get("db");
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0) return c.json(errorRes("账号 ID 无效", "bad_request"), 400);
+  try {
+    const auth = await dbManager.getPlatformCredentials(id);
+    const result = await getPlatformAdapter(auth.provider).verify(auth.credentials);
+    await dbManager.writeLog("success", "operation", `账号 [${auth.alias}] 连接检测通过（${auth.provider}）`);
+    return c.json(successRes({
+      ok: true,
+      platform: auth.provider,
+      alias: auth.alias,
+      identity: result.identity ?? null,
+      checked_at: new Date().toISOString()
+    }));
+  } catch (error) {
+    return platformFailure(c, error, "账号连接检测失败", "account_check_failed");
   }
 });
 
@@ -1199,72 +1247,102 @@ async function unifiedAdapterFor(dbManager: DatabaseManager, accountId: number) 
   return { auth, adapter: getPlatformAdapter(auth.provider) };
 }
 
-app.get("/api/unified/records/:accountId/:domainId", async (c) => {
+function assertCapability(provider: PlatformId, capability: PlatformCapability): void {
+  if (!getPlatformDefinition(provider).capabilities.includes(capability)) {
+    throw new PlatformError(`${provider} 不支持该操作（${capability}）`, 400, "unsupported_operation");
+  }
+}
+
+function platformFailure(c: Context, error: unknown, fallback: string, fallbackCode: string) {
+  const message = error instanceof Error ? error.message : fallback;
+  const code = error instanceof PlatformError ? error.code : fallbackCode;
+  const status = (error instanceof PlatformError ? error.status : 502) as 400 | 401 | 403 | 404 | 409 | 429 | 500 | 502;
+  return c.json(errorRes(message, code), status);
+}
+
+/** 统一路由的公共参数校验：账号必须是正整数，域名 ID 不能为空。 */
+function unifiedTarget(c: Context): { accountId: number; domainId: string } {
+  const accountId = Number(c.req.param("accountId"));
+  const domainId = c.req.param("domainId") ?? "";
+  if (!Number.isInteger(accountId) || accountId <= 0) throw new PlatformError("账号 ID 无效", 400, "bad_request");
+  if (!domainId) throw new PlatformError("域名 ID 不能为空", 400, "bad_request");
+  return { accountId, domainId };
+}
+
+/**
+ * 统一记录路由的处理体。
+ *
+ * 同一套逻辑同时挂在 `/api/unified/records/...`（面板内部使用、语义最明确）
+ * 与 `/api/records/...`（对外文档里的短路径）上，避免两处实现走偏。
+ */
+const unifiedListRecords = async (c: Context) => {
   const dbManager = c.get("db");
   try {
-    const accountId = Number(c.req.param("accountId"));
-    const domainId = c.req.param("domainId");
+    const { accountId, domainId } = unifiedTarget(c);
     const { auth, adapter } = await unifiedAdapterFor(dbManager, accountId);
+    assertCapability(auth.provider, "records.read");
     return c.json(successRes({ records: await adapter.listRecords(auth.credentials, domainId), platform: auth.provider }));
   } catch (error) {
-    const message = error instanceof Error ? error.message : "读取解析记录失败";
-    return c.json(errorRes(message, "records_read_failed"), 502);
+    return platformFailure(c, error, "读取解析记录失败", "records_read_failed");
   }
-});
+};
 
-app.post("/api/unified/records/:accountId/:domainId", async (c) => {
+const unifiedCreateRecord = async (c: Context) => {
   const dbManager = c.get("db");
   try {
-    const accountId = Number(c.req.param("accountId"));
-    const domainId = c.req.param("domainId");
+    const { accountId, domainId } = unifiedTarget(c);
     const input = unifiedRecordInput(await c.req.json() as UnifiedRecordBody);
     const { auth, adapter } = await unifiedAdapterFor(dbManager, accountId);
+    assertCapability(auth.provider, "records.create");
     if (auth.provider === "cloudflare") {
       const domain = (await adapter.listDomains(auth.credentials, accountId, auth.alias)).find((item) => item.id === domainId);
-      input.zone_name = domain?.name || "";
+      if (!domain) throw new PlatformError("目标 Zone 不在当前 Cloudflare 账号下", 404, "domain_not_found");
+      input.zone_name = domain.name;
     }
     const record = await adapter.createRecord(auth.credentials, domainId, input);
     return c.json(successRes({ record, platform: auth.provider }));
   } catch (error) {
-    const message = error instanceof Error ? error.message : "创建解析记录失败";
-    return c.json(errorRes(message, "records_create_failed"), 400);
+    return platformFailure(c, error, "创建解析记录失败", "records_create_failed");
   }
-});
+};
 
-app.put("/api/unified/records/:accountId/:domainId/:recordId", async (c) => {
+const unifiedUpdateRecord = async (c: Context) => {
   const dbManager = c.get("db");
   try {
-    const accountId = Number(c.req.param("accountId"));
-    const domainId = c.req.param("domainId");
+    const { accountId, domainId } = unifiedTarget(c);
     const recordId = c.req.param("recordId");
+    if (!recordId) throw new PlatformError("记录 ID 不能为空", 400, "bad_request");
     const input = unifiedRecordInput(await c.req.json() as UnifiedRecordBody);
     const { auth, adapter } = await unifiedAdapterFor(dbManager, accountId);
+    assertCapability(auth.provider, "records.update");
     if (auth.provider === "cloudflare") {
       const domain = (await adapter.listDomains(auth.credentials, accountId, auth.alias)).find((item) => item.id === domainId);
-      input.zone_name = domain?.name || "";
+      if (!domain) throw new PlatformError("目标 Zone 不在当前 Cloudflare 账号下", 404, "domain_not_found");
+      input.zone_name = domain.name;
     }
     const record = await adapter.updateRecord(auth.credentials, domainId, recordId, { ...input, record_id: recordId });
     return c.json(successRes({ record, platform: auth.provider }));
   } catch (error) {
-    const message = error instanceof Error ? error.message : "更新解析记录失败";
-    return c.json(errorRes(message, "records_update_failed"), 400);
+    return platformFailure(c, error, "更新解析记录失败", "records_update_failed");
   }
-});
+};
 
-app.delete("/api/unified/records/:accountId/:domainId/:recordId", async (c) => {
+const unifiedDeleteRecord = async (c: Context) => {
   const dbManager = c.get("db");
   try {
-    const accountId = Number(c.req.param("accountId"));
+    const { accountId, domainId } = unifiedTarget(c);
+    const recordId = c.req.param("recordId");
+    if (!recordId) throw new PlatformError("记录 ID 不能为空", 400, "bad_request");
     const { auth, adapter } = await unifiedAdapterFor(dbManager, accountId);
-    await adapter.deleteRecord(auth.credentials, c.req.param("domainId"), c.req.param("recordId"));
+    assertCapability(auth.provider, "records.delete");
+    await adapter.deleteRecord(auth.credentials, domainId, recordId);
     return c.json(successRes({ platform: auth.provider }));
   } catch (error) {
-    const message = error instanceof Error ? error.message : "删除解析记录失败";
-    return c.json(errorRes(message, "records_delete_failed"), 400);
+    return platformFailure(c, error, "删除解析记录失败", "records_delete_failed");
   }
-});
+};
 
-app.post("/api/unified/records/batch", async (c) => {
+const unifiedBatchRecords = async (c: Context) => {
   const dbManager = c.get("db");
   try {
     const body = await c.req.json() as { account_id?: unknown; domain_id?: unknown; operation?: unknown; ids?: unknown; value?: unknown };
@@ -1272,18 +1350,36 @@ app.post("/api/unified/records/batch", async (c) => {
     const domainId = String(body.domain_id || "");
     const operation = String(body.operation || "") as "delete" | "status" | "ttl" | "line";
     const ids = Array.isArray(body.ids) ? body.ids.map(String).filter(Boolean) : [];
-    if (!Number.isInteger(accountId) || !domainId || !["delete", "status", "ttl", "line"].includes(operation) || ids.length === 0 || ids.length > 100) {
+    if (!Number.isInteger(accountId) || accountId <= 0 || !domainId || !["delete", "status", "ttl", "line"].includes(operation) || ids.length === 0 || ids.length > 100) {
       return c.json(errorRes("批量解析参数无效", "bad_request"), 400);
     }
+    if (operation === "ttl" && !(Number(body.value) > 0)) {
+      return c.json(errorRes("批量修改 TTL 需要正整数秒数", "bad_request"), 400);
+    }
+    if (operation === "line" && !String(body.value || "").trim()) {
+      return c.json(errorRes("批量修改线路需要线路名称", "bad_request"), 400);
+    }
     const { auth, adapter } = await unifiedAdapterFor(dbManager, accountId);
-    if (!adapter.batchOperation) return c.json(errorRes(`${auth.provider} 不支持该批量操作`, "unsupported_batch_operation"), 400);
+    assertCapability(auth.provider, "records.batch");
+    if (!adapter.batchOperation) throw new PlatformError(`${auth.provider} 不支持该批量操作`, 400, "unsupported_batch_operation");
     await adapter.batchOperation(auth.credentials, domainId, operation, ids, body.value as string | number | boolean | undefined);
     return c.json(successRes({ platform: auth.provider, operation, count: ids.length }));
   } catch (error) {
-    const message = error instanceof Error ? error.message : "批量解析操作失败";
-    return c.json(errorRes(message, "batch_operation_failed"), 400);
+    return platformFailure(c, error, "批量解析操作失败", "batch_operation_failed");
   }
-});
+};
+
+// 注意注册顺序：`/batch` 必须先于 `/:accountId/:domainId`，否则 "batch" 会被当成账号 ID。
+app.post("/api/unified/records/batch", unifiedBatchRecords);
+app.post("/api/records/batch", unifiedBatchRecords);
+app.get("/api/unified/records/:accountId/:domainId", unifiedListRecords);
+app.get("/api/records/:accountId/:domainId", unifiedListRecords);
+app.post("/api/unified/records/:accountId/:domainId", unifiedCreateRecord);
+app.post("/api/records/:accountId/:domainId", unifiedCreateRecord);
+app.put("/api/unified/records/:accountId/:domainId/:recordId", unifiedUpdateRecord);
+app.put("/api/records/:accountId/:domainId/:recordId", unifiedUpdateRecord);
+app.delete("/api/unified/records/:accountId/:domainId/:recordId", unifiedDeleteRecord);
+app.delete("/api/records/:accountId/:domainId/:recordId", unifiedDeleteRecord);
 
 /**
  * 域名管理 API
@@ -2890,8 +2986,8 @@ app.post("/api/settings/test-webhook", async (c) => {
       client = auth.client;
     } else {
       const accounts = await dbManager.getAccounts();
-      // 优先取第一个 DNSHE 账号；Cloudflare 账号没有 WHOIS 代理能力
-      const dnsheAccount = accounts.find((acc) => acc.provider !== "cloudflare");
+      // 优先取第一个 DNSHE 账号；Cloudflare / DNSNEKO / GLEAM 均无 WHOIS 代理能力
+      const dnsheAccount = accounts.find((acc) => acc.provider === "dnshe");
       if (dnsheAccount) {
         const auth = await dbManager.getClientForAccount(dnsheAccount.id);
         if (!(auth.client instanceof DNSHEClient)) {
@@ -4683,6 +4779,28 @@ app.get("/api/overview", async (c) => {
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "聚合统计失败";
     return c.json(errorRes(message), 500);
+  }
+});
+
+/**
+ * 统一域名详情：`GET /api/domains/:accountId/:domainId`
+ *
+ * 必须注册在文件末尾 —— 前面已有 `GET /api/domains/:id/dns` 与
+ * `GET /api/domains/:id/propagation` 两个同形状路由，先注册会把它们的
+ * `:domainId` 段（dns / propagation）当成域名 ID 吃掉。
+ */
+app.get("/api/domains/:accountId/:domainId", async (c) => {
+  const dbManager = c.get("db");
+  try {
+    const { accountId, domainId } = unifiedTarget(c);
+    const { auth, adapter } = await unifiedAdapterFor(dbManager, accountId);
+    assertCapability(auth.provider, "domains.read");
+    const domains = await adapter.listDomains(auth.credentials, accountId, auth.alias);
+    const domain = domains.find((item) => item.id === domainId);
+    if (!domain) return c.json(errorRes("域名不存在或不属于该账号", "domain_not_found"), 404);
+    return c.json(successRes({ domain, platform: auth.provider }));
+  } catch (error) {
+    return platformFailure(c, error, "读取域名详情失败", "domain_read_failed");
   }
 });
 

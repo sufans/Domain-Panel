@@ -15,6 +15,8 @@ const accounts = [
   { id: 3, alias: "备用账号", api_key: "dnshe_demo_gamma", provider: "dnshe", created_at: "2026-09-01T08:00:00Z" },
   { id: 101, alias: "CF · 主工作区", api_key: "cf_demo_alpha", provider: "cloudflare", created_at: "2026-08-03T08:00:00Z" },
   { id: 102, alias: "CF · 备用工作区", api_key: "cf_demo_beta", provider: "cloudflare", created_at: "2026-09-05T08:00:00Z" },
+  { id: 301, alias: "NEKO · 演示账号", api_key: "dnsneko:demo-user", provider: "dnsneko", created_at: "2026-09-18T08:00:00Z" },
+  { id: 401, alias: "GLEAM · 演示账号", api_key: "gleam:demo-fingerprint", provider: "gleam", created_at: "2026-09-20T08:00:00Z" },
 ];
 
 const dnsheDomains = [
@@ -50,7 +52,7 @@ const cfZones = [
 const overview = {
   success: true,
   domains: { total: dnsheDomains.length, active: 7, expired: 0, expiring_soon: 1, delegated: 2, not_delegated: 6 },
-  accounts: { total: accounts.length, dnshe: 3, cloudflare: 2 },
+  accounts: { total: accounts.length, dnshe: 3, cloudflare: 2, dnsneko: 1, gleam: 1 },
   quota: {
     total: 100000, used: 18420, available: 81580, failed: 0,
     accounts: [
@@ -102,6 +104,33 @@ const dnsRecords = [
   { id: "demo-txt", name: "_status", type: "TXT", content: "demo=static-pages", ttl: 300, priority: null, line: "default", proxied: false },
 ];
 
+const platformDefinitions = [
+  { id: "dnshe", name: "DNSHE", description: "DNSHE 子域名、解析记录、注册与续期管理",
+    credentialFields: [{ key: "api_key", label: "API Key", required: true }, { key: "api_secret", label: "API Secret", required: true, secret: true }],
+    capabilities: ["domains.read", "records.read", "records.create", "records.update", "records.delete", "domains.register", "domains.renew", "quota.read"],
+    upstreamHosts: ["api005.dnshe.com"], rateLimit: { requests: 55, windowSeconds: 60 } },
+  { id: "cloudflare", name: "Cloudflare", description: "Cloudflare Zone、DNS 记录和账户资源管理",
+    credentialFields: [{ key: "api_token", label: "API Token", required: true, secret: true }],
+    capabilities: ["domains.read", "records.read", "records.create", "records.update", "records.delete", "zones.manage", "quota.read"],
+    upstreamHosts: ["api.cloudflare.com"], rateLimit: { requests: 40, windowSeconds: 60 } },
+  { id: "dnsneko", name: "DNSNEKO", description: "DNSNEKO 域名、解析记录和批量 DNS 操作",
+    credentialFields: [{ key: "username", label: "Username", required: true }, { key: "api_key", label: "API Key", required: true, secret: true }],
+    capabilities: ["domains.read", "records.read", "records.create", "records.update", "records.delete", "records.batch"],
+    upstreamHosts: ["www.dnsneko.com"], rateLimit: { requests: 28, windowSeconds: 60 } },
+  { id: "gleam", name: "GLEAM", description: "GLEAM 子域名和解析记录管理",
+    credentialFields: [{ key: "api_key", label: "API Key", required: true, secret: true, placeholder: "hl6_xxxxxxxxxxxx" }],
+    capabilities: ["domains.read", "records.read", "records.create", "records.update", "records.delete"],
+    recordTypes: ["A", "AAAA", "CNAME", "TXT"],
+    upstreamHosts: ["sld.0n.pub"], rateLimit: { requests: 55, windowSeconds: 60 } },
+];
+
+const unifiedDomains = [
+  { id: "2052027056887279618", name: "demo.a.os.kg", platform: "dnsneko", accountId: 301, accountAlias: "NEKO · 演示账号",
+    status: "0", createdAt: "2026-04-26T20:33:28", expiresAt: "2027-05-06T22:05:50", expired: false, remainingDays: 178, recordCount: 3, raw: null },
+  { id: "42", name: "demo.example.com", platform: "gleam", accountId: 401, accountAlias: "GLEAM · 演示账号",
+    status: "active", createdAt: "2026-01-01T00:00:00Z", expiresAt: null, expired: false, remainingDays: null, recordCount: 2, raw: null },
+];
+
 export function demoFetch(input: RequestInfo | URL, options: RequestInit = {}): Promise<Response> {
   const raw = typeof input === "string" ? input : input.toString();
   const url = new URL(raw, window.location.origin);
@@ -111,6 +140,23 @@ export function demoFetch(input: RequestInfo | URL, options: RequestInit = {}): 
   if (path === "/api/auth/status") return Promise.resolve(json({ success: true, initialized: true, two_fa_enabled: false }));
   if (path === "/api/auth/account") return Promise.resolve(json({ success: true, username: "demo-admin", two_fa_enabled: false }));
   if (path === "/api/accounts" && method === "GET") return Promise.resolve(json({ success: true, accounts }));
+  if (path === "/api/platforms") return Promise.resolve(json({ success: true, platforms: platformDefinitions }));
+  if (/^\/api\/accounts\/\d+\/check$/.test(path) && method === "POST") {
+    const id = Number(path.split("/")[3]);
+    const account = accounts.find((item) => item.id === id);
+    return Promise.resolve(account
+      ? json({ success: true, ok: true, platform: account.provider, alias: account.alias, identity: null, checked_at: now.toISOString() })
+      : json({ success: false, message: "静态演示中未找到该账号", code: "not_found" }, 404));
+  }
+  if (path === "/api/unified/domains") {
+    const provider = url.searchParams.get("provider");
+    const list = provider ? unifiedDomains.filter((domain) => domain.platform === provider) : unifiedDomains;
+    return Promise.resolve(json({ success: true, domains: list, errors: [], accounts: accounts.filter((item) => item.provider === "dnsneko" || item.provider === "gleam").map((item) => ({ id: item.id, alias: item.alias, platform: item.provider })), live: true, generated_at: now.toISOString() }));
+  }
+  if (/^\/api\/unified\/records\/\d+\/[^/]+$/.test(path) && method === "GET") {
+    return Promise.resolve(json({ success: true, records: dnsRecords.map((record) => ({ ...record, domainId: path.split("/")[4], value: record.content, content: undefined, status: "active", updatedAt: now.toISOString(), raw: null })), platform: "dnsneko" }));
+  }
+  if (path === "/api/unified/records/batch" && method === "POST") return Promise.resolve(json({ success: true, count: 1, message: "静态演示不会写入真实资源" }));
   if (path === "/api/overview") return Promise.resolve(json(overview));
   if (path === "/api/quota") return Promise.resolve(json({ success: true, quotas }));
   if (path === "/api/logs") return Promise.resolve(json({ success: true, logs }));
