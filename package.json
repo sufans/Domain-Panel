@@ -1,7 +1,7 @@
 {
-  "name": "dnshe-panel",
+  "name": "domain-panel",
   "version": "1.0.0",
-  "description": "DNSHE Multi-Account Domain Manager Cloudflare Worker",
+  "description": "Multi-platform DNS aggregation manager for Cloudflare Workers and Node",
   "main": "src/index.ts",
   "scripts": {
     "clean:local": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/clean-local.ps1 -Force",
@@ -12,7 +12,6 @@
     "verify:node": "tsc --noEmit -p server",
     "test:node": "esbuild server/d1-sqlite.test.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist-node/d1-sqlite.test.mjs && node dist-node/d1-sqlite.test.mjs",
     "test:local-kv": "esbuild server/local-kv.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist-node/local-kv.mjs && node scripts/test-local-kv.mjs",
-    "test:pages": "node scripts/test-pages-demo.mjs",
     "test:quota": "node scripts/test-cf-quota-model.mjs",
     "test:overview": "node scripts/test-overview-cf-model.mjs",
     "test:overview:layout": "node scripts/test-overview-context-layout.mjs",

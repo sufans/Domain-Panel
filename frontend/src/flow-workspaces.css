@@ -1,7 +1,6 @@
 .ddns-directory,.logs-workspace { min-width: 0; color: var(--text-primary); }
 .ddns-directory .flow-tools > button,.ddns-directory select,.logs-workspace__actions button,.log-new-items,.ddns-actions button { min-height: 40px; padding: 8px 12px; background: var(--bg-surface); border: 1px solid var(--border-base); border-radius: 5px; color: var(--text-secondary); font-size: 12px; white-space: nowrap; }
 .ddns-directory button:hover,.logs-workspace button:hover { background: var(--bg-hover); }
-.ddns-demo-label { margin: 0 0 16px; padding: 9px 12px; background: var(--bg-elevated); color: var(--text-secondary); font-size: 12px; border-left: 2px solid var(--text-primary); }
 .ddns-identity { display: grid; gap: 5px; min-width: 0; text-align: left; }
 .ddns-identity strong { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
 .ddns-identity code,.ddns-directory code { font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }

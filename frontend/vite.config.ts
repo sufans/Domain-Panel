@@ -5,7 +5,7 @@ import react from "@vitejs/plugin-react";
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
 
-  // 🔴 构建期硬校验：Cloudflare / Docker 两条链路都是「前后端同源」，
+  // 🔴 构建期硬校验：Cloudflare Workers / Node 两条链路都是「前后端同源」，
   //    产物里必须烘焙 VITE_API_BASE_URL=/（App.tsx 会把末尾斜杠削掉，请求变成相对路径 /api/xxx）。
   //
   //    漏掉它 `vite build` 不报错、`wrangler deploy` 也成功，但线上登录直接报
@@ -36,9 +36,7 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react()],
-    // GitHub Pages serves the app below /<repository>/; the static demo uses
-    // relative asset URLs while Worker/Docker builds keep the existing root base.
-    base: env.VITE_STATIC_DEMO === "1" ? "./" : "/",
+    base: "/",
     server: {
       port: 3000,
       proxy: {

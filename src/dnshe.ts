@@ -295,7 +295,7 @@ export class DNSHEClient {
         const trace = rayId ? `；Ray ID: ${rayId}` : "";
         return {
           ok: false, status: response.status, data: null, code: "dnshe_upstream_error", diagnostic,
-          message: `DNSHE 上游服务返回 HTTP ${response.status}（${endpoint}${action ? "/" + action : ""}${trace}），不能据此判断密钥无效。请稍后重试；若本地可用而 Workers 持续失败，请联系 DNSHE 排查请求出口或使用可访问上游的 Docker 主机。`,
+          message: `DNSHE 上游服务返回 HTTP ${response.status}（${endpoint}${action ? "/" + action : ""}${trace}），不能据此判断密钥无效。请稍后重试；若本地可用而 Workers 持续失败，请联系 DNSHE 排查请求出口或使用可访问上游的 Node 主机。`,
         };
       }
       const parsed = await response.json().catch((error: unknown) => {

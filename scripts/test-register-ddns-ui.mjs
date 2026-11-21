@@ -379,17 +379,14 @@ try {
     assert.equal(report.requests.filter(request => request.path === "/api/whois").length, before);
   });
 
-  await check("DDNS 空绑定显示明确的模拟运行面", async () => {
+  await check("DDNS 空绑定显示明确的空状态", async () => {
     await page.goto(new URL("/#ddns", base).href, { waitUntil: "networkidle" });
     const ddnsMain = page.locator('main[data-workspace="ddns"]');
-    await ddnsMain.getByText("模拟数据 · 不会写入 DNS", { exact: true }).waitFor();
-    assert((await ddnsMain.getByText(/第 2 次重试/).count()) >= 1);
-    assert((await ddnsMain.getByText(/最近事件/).count()) >= 1);
+    await ddnsMain.getByText("尚无真实绑定。新增绑定后可以生成设备脚本或更新 DNS。", { exact: true }).waitFor();
+    assert.equal(await ddnsMain.getByRole("button", { name: /模拟预览/ }).count(), 0);
     await page.getByRole("group", { name: "界面画风", exact: true }).getByRole("button", { name: "卡片风", exact: true }).click();
     await ddnsMain.locator('[data-ddns-view="cards"]').waitFor();
-    assert.equal(await ddnsMain.locator(".ddns-binding-card").count(), 2);
-    assert.equal(await ddnsMain.locator(".ddns-actions").count(), 0);
-    assert((await ddnsMain.getByText("仅演示 · 无真实令牌", { exact: true }).count()) === 2);
+    assert.equal(await ddnsMain.locator(".ddns-binding-card").count(), 0);
   });
 } finally {
   report.passed = report.tests.length === 16 && report.tests.every((test) => test.passed) && report.pageErrors.length === 0;

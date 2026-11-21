@@ -1,7 +1,7 @@
 import type { CreateDnsRecordParams, UpdateDnsRecordParams } from "../../dnshe";
 import { requestJson } from "./http";
 import type { PlatformAdapter, PlatformCredentials, UnifiedDomain, UnifiedRecord } from "../types";
-import { PlatformError, remainingDays } from "../types";
+import { PlatformError, redactPlatformSecrets, remainingDays } from "../types";
 
 const BASE = "https://www.dnsneko.com/api/v1/dns";
 type NekoResponse<T> = { code: number | string; message?: string; data: T | null };
@@ -34,8 +34,15 @@ function headers(credentials: PlatformCredentials, json = false): HeadersInit {
 }
 
 async function request<T>(credentials: PlatformCredentials, path: string, init: RequestInit = {}): Promise<T> {
-  const payload = await requestJson<NekoResponse<T>>(`${BASE}${path}`, { ...init, headers: { ...headers(credentials, init.body !== undefined), ...(init.headers || {}) } });
-  if (String(payload.code) !== "200") throw new PlatformError(payload.message || "DNSNEKO API 调用失败", Number(payload.code) || 502, "upstream_error");
+  const payload = await requestJson<NekoResponse<T>>(
+    `${BASE}${path}`,
+    { ...init, headers: { ...headers(credentials, init.body !== undefined), ...(init.headers || {}) } },
+    [credentials.apiKey]
+  );
+  if (String(payload.code) !== "200") {
+    const status = Number(payload.code);
+    throw new PlatformError(redactPlatformSecrets(payload.message || "DNSNEKO API 调用失败", [credentials.apiKey]), Number.isFinite(status) ? status : 502, "upstream_error");
+  }
   return payload.data as T;
 }
 
@@ -81,6 +88,12 @@ export function createDnsNekoAdapter(): PlatformAdapter {
       await request<null>(credentials, `/records/${encodeURIComponent(domainId)}/${encodeURIComponent(recordId)}`, { method: "DELETE" });
     },
     async batchOperation(credentials, domainId, operation, ids, value) {
+      if (operation === "ttl" && !(Number.isInteger(Number(value)) && Number(value) > 0)) {
+        throw new PlatformError("DNSNEKO 批量修改 TTL 需要正整数秒数", 400, "invalid_ttl");
+      }
+      if (operation === "line" && !String(value || "").trim()) {
+        throw new PlatformError("DNSNEKO 批量修改线路需要线路名称", 400, "invalid_line");
+      }
       const fields = [`"domainId":${rawId(domainId)}`, `"ids":[${ids.map(rawId).join(",")}]`];
       if (operation === "status") fields.push(`"status":${value === true || value === 1 ? 1 : 0}`);
       if (operation === "ttl") fields.push(`"ttl":${Number(value)}`);

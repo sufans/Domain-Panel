@@ -113,8 +113,6 @@ const VISIBLE_RULE_TOKENS = new Set([
   "字母", "数字", "拼音", "城市", "城市简写", "省份简写", "区号", "邮编", "双拼", "CVCV",
 ]);
 
-const STATIC_DEMO = import.meta.env.VITE_STATIC_DEMO === "1";
-
 // API 响应基本接口
 export interface ApiResponse {
   success: boolean;
@@ -1425,7 +1423,7 @@ export default function App() {
   // ===== 鉴权与登录状态 =====
   // 当前会话 Token（登录成功后签发；存在即视为已登录）
   const [sessionToken, setSessionToken] = useState<string | null>(
-    () => STATIC_DEMO ? "static-demo-session" : (sessionStorage.getItem("DNSHE_SESSION") || localStorage.getItem("DNSHE_SESSION"))
+    () => sessionStorage.getItem("DNSHE_SESSION") || localStorage.getItem("DNSHE_SESSION")
   );
   // 是否已向后端查询过鉴权状态（决定登录页显示"登录"还是"首次设置"）
   const [authStatusLoaded, setAuthStatusLoaded] = useState(false);
@@ -1466,10 +1464,6 @@ export default function App() {
    * 统一 API 请求封装 — 自动注入 Authorization 头部与后端 Worker 基准域名
    */
   const apiFetch = async (url: string, options: RequestInit = {}): Promise<Response> => {
-    if (STATIC_DEMO) {
-      const { demoFetch } = await import("./demo-api");
-      return demoFetch(url, options);
-    }
     // 从会话存储获取登录后签发的 Session Token
     const token = sessionStorage.getItem("DNSHE_SESSION") || localStorage.getItem("DNSHE_SESSION");
     const storedBackend = backendUrl || localStorage.getItem("DNSHE_BACKEND_URL") || (import.meta as any).env?.VITE_API_BASE_URL;
@@ -2479,7 +2473,7 @@ export default function App() {
   // 3. 获取配额列表（默认命中缓存，forceRefresh 时强制回源刷新）
   // ═══════════════════════════════════════════════════════════════════════
   // 主域新增：概览聚合 / 域名助力 / API 密钥
-  //   （这三块对应的后端路由仅存在于当前完整后端版本，静态演示不会请求它们）
+  //   （这三块对应完整后端路由，前端按需请求）
   // ═══════════════════════════════════════════════════════════════════════
 
   const [overview, setOverview] = useState<OverviewData | null>(null);

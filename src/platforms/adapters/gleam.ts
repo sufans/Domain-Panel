@@ -1,6 +1,6 @@
 import { requestJson } from "./http";
 import type { PlatformAdapter, PlatformCredentials, UnifiedDomain, UnifiedRecord } from "../types";
-import { PlatformError } from "../types";
+import { PlatformError, redactPlatformSecrets } from "../types";
 
 const BASE = "https://sld.0n.pub/api/v1/open";
 type GleamResponse<T> = { code: number; message?: string; data: T };
@@ -17,8 +17,12 @@ function headers(credentials: PlatformCredentials, json = false, idempotent = fa
 }
 
 async function request<T>(credentials: PlatformCredentials, path: string, init: RequestInit = {}): Promise<T> {
-  const payload = await requestJson<GleamResponse<T>>(`${BASE}${path}`, { ...init, headers: { ...headers(credentials, init.body !== undefined, init.method !== undefined && init.method !== "GET"), ...(init.headers || {}) } });
-  if (payload.code !== 0) throw new PlatformError(payload.message || "GLEAM API 调用失败", 502, "upstream_error");
+  const payload = await requestJson<GleamResponse<T>>(
+    `${BASE}${path}`,
+    { ...init, headers: { ...headers(credentials, init.body !== undefined, init.method !== undefined && init.method !== "GET"), ...(init.headers || {}) } },
+    [credentials.apiKey]
+  );
+  if (payload.code !== 0) throw new PlatformError(redactPlatformSecrets(payload.message || "GLEAM API 调用失败", [credentials.apiKey]), 502, "upstream_error");
   return payload.data;
 }
 

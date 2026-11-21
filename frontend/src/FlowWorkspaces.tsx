@@ -9,26 +9,19 @@ export type DdnsBinding = {
 };
 const resultLabel = (status?: string) => status === "good" ? "已变更" : status === "nochg" ? "无变化" : status || "尚未更新";
 const dateTime = (value?: string) => value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "尚无记录";
-const demoBindings: DdnsBinding[] = [
-  { id: "demo-home", account_id: 0, label: "家庭网络", domain: "home.example.cc", record_type: "A", token: "无真实令牌", created_at: "", last_ip: "203.0.113.24", last_status: "good", last_at: "2026-10-17T10:42:00+08:00" },
-  { id: "demo-office", account_id: 0, label: "办公出口", domain: "office.example.cc", record_type: "A", token: "无真实令牌", created_at: "", last_ip: "198.51.100.18", last_status: "第 2 次重试", last_at: "2026-10-17T10:39:00+08:00" },
-];
-
 export function DdnsDirectory({ bindings, accounts, loading, dataStyle, style, onUpdate, onScript, onDelete }: {
   bindings: DdnsBinding[]; accounts: Array<{ id: number; alias: string }>; loading: boolean; dataStyle: boolean;
   style?: InterfaceStyle;
   onUpdate: (id: string, domain: string) => void; onScript: (id: string) => void; onDelete: (id: string, domain: string) => void;
 }) {
-  const [preview, setPreview] = useState(bindings.length === 0);
   const { query } = usePageSearch();
   const [status, setStatus] = useState("all");
   const [page, setPage] = useState(1);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const view = style || (dataStyle ? "data" : "design");
-  useEffect(() => { if (bindings.length) setPreview(false); }, [bindings.length]);
-  useEffect(() => { setPage(1); }, [query, status, preview]);
+  useEffect(() => { setPage(1); }, [query, status]);
   const names = new Map(accounts.map((account) => [account.id, account.alias]));
-  const rows = (preview ? demoBindings : bindings).filter((binding) => {
+  const rows = bindings.filter((binding) => {
     const ok = binding.last_status === "good" || binding.last_status === "nochg";
     return (status === "all" || (status === "attention" ? !!binding.last_status && !ok : !binding.last_status)) &&
       `${binding.label} ${binding.domain} ${names.get(binding.account_id) || ""}`.toLowerCase().includes(query.trim().toLowerCase());
@@ -37,23 +30,22 @@ export function DdnsDirectory({ bindings, accounts, loading, dataStyle, style, o
   const currentPage = Math.min(page, pages);
   const visible = rows.slice((currentPage - 1) * 10, currentPage * 10);
   const selected = rows.find((binding) => binding.id === selectedId) || visible[0];
-  const actions = (binding: DdnsBinding) => !preview && <div className="ddns-actions"><button onClick={() => onUpdate(binding.id, binding.domain)}>立即更新</button><button onClick={() => onScript(binding.id)}>设备脚本</button><button className="is-danger" onClick={() => onDelete(binding.id, binding.domain)}>删除</button></div>;
+  const actions = (binding: DdnsBinding) => <div className="ddns-actions"><button onClick={() => onUpdate(binding.id, binding.domain)}>立即更新</button><button onClick={() => onScript(binding.id)}>设备脚本</button><button className="is-danger" onClick={() => onDelete(binding.id, binding.domain)}>删除</button></div>;
   const identity = (binding: DdnsBinding) => <><strong>{binding.label || binding.domain}</strong><code>{binding.domain}</code></>;
-  return <section className={`ddns-directory is-${view}`} aria-label={preview ? "动态 DNS 模拟运行面" : "动态 DNS 绑定目录"}>
-    <div className="flow-tools"><select aria-label="筛选动态 DNS 状态" value={status} onChange={(event) => setStatus(event.target.value)}><option value="all">全部状态</option><option value="attention">需要关注</option><option value="pending">尚未更新</option></select><button aria-pressed={preview} onClick={() => { setPreview(!preview); setSelectedId(null); }}>{preview ? "关闭模拟预览" : "查看模拟预览"}</button></div>
-    {preview && <p className="ddns-demo-label">模拟数据 · 不会写入 DNS</p>}
+  return <section className={`ddns-directory is-${view}`} aria-label="动态 DNS 绑定目录">
+    <div className="flow-tools"><select aria-label="筛选动态 DNS 状态" value={status} onChange={(event) => setStatus(event.target.value)}><option value="all">全部状态</option><option value="attention">需要关注</option><option value="pending">尚未更新</option></select></div>
     {loading && <p className="flow-caption" role="status">正在读取绑定…</p>}
     {!rows.length ? <p className="flow-empty-inline">{query || status !== "all" ? "没有匹配的绑定。" : "尚无真实绑定。新增绑定后可以生成设备脚本或更新 DNS。"}</p> : view === "cards" ? <div className="ddns-card-grid" data-ddns-view="cards">
       {visible.map(binding => <article key={binding.id} className="ddns-binding-card" data-ddns-id={binding.id}>
         <header><div className="ddns-identity">{identity(binding)}</div><span className={`ddns-card-result${binding.last_status && !["good", "nochg"].includes(binding.last_status) ? " is-warning" : ""}`}>{resultLabel(binding.last_status)}</span></header>
-        <p className="ddns-card-account">{preview ? "模拟账号 · 不会写入 DNS" : names.get(binding.account_id) || `账号 ${binding.account_id}`}<span>{binding.record_type}</span></p>
+        <p className="ddns-card-account">{names.get(binding.account_id) || `账号 ${binding.account_id}`}<span>{binding.record_type}</span></p>
         <dl><div><dt>最近 IP</dt><dd><code>{binding.last_ip || "未返回"}</code></dd></div><div><dt>更新时间</dt><dd><time>{dateTime(binding.last_at)}</time></dd></div></dl>
-        <footer>{preview ? <span className="flow-caption">仅演示 · 无真实令牌</span> : actions(binding)}</footer>
+        <footer>{actions(binding)}</footer>
       </article>)}
     </div> : view === "data" ? <div className="ddns-scan" data-ddns-view="data">
       <div className="ddns-scan__row ddns-scan__head"><span>名称 / 域名</span><span>账号 / 类型</span><span>最近 IP</span><span>最近结果 / 时间</span><span>操作</span></div>
-      {visible.map((binding) => <div className="ddns-scan__row" key={binding.id}><div className="ddns-identity">{identity(binding)}</div><div><span>{preview ? "模拟账号" : names.get(binding.account_id) || `账号 ${binding.account_id}`}</span><small>{binding.record_type}</small></div><code>{binding.last_ip || "未返回"}</code><div><b className={binding.last_status && !["good", "nochg"].includes(binding.last_status) ? "is-warning" : ""}>{resultLabel(binding.last_status)}</b><time>{dateTime(binding.last_at)}</time></div>{preview ? <span className="flow-caption">仅演示</span> : actions(binding)}</div>)}
-    </div> : <div className="ddns-editorial" data-ddns-view="design"><div className="ddns-roster">{visible.map((binding) => <button key={binding.id} className="ddns-roster__item" aria-pressed={selected?.id === binding.id} onClick={() => setSelectedId(binding.id)}><span className="ddns-identity">{identity(binding)}</span><span>{resultLabel(binding.last_status)}</span></button>)}</div>{selected && <article className="ddns-inspector"><header><span className="flow-caption">{preview ? "最近事件 · 模拟" : "最近执行"}</span><h3>{selected.label || selected.domain}</h3><code>{selected.domain}</code></header><dl><div><dt>最近 IP</dt><dd>{selected.last_ip || "未返回"}</dd></div><div><dt>执行结果</dt><dd>{resultLabel(selected.last_status)}</dd></div><div><dt>更新时间</dt><dd>{dateTime(selected.last_at)}</dd></div><div><dt>所属账号</dt><dd>{preview ? "模拟账号" : names.get(selected.account_id) || `账号 ${selected.account_id}`}</dd></div><div><dt>记录类型</dt><dd>{selected.record_type}</dd></div><div><dt>令牌</dt><dd>{preview ? "无真实令牌" : "已保管（不在页面显示）"}</dd></div></dl>{actions(selected)}</article>}</div>}
+      {visible.map((binding) => <div className="ddns-scan__row" key={binding.id}><div className="ddns-identity">{identity(binding)}</div><div><span>{names.get(binding.account_id) || `账号 ${binding.account_id}`}</span><small>{binding.record_type}</small></div><code>{binding.last_ip || "未返回"}</code><div><b className={binding.last_status && !["good", "nochg"].includes(binding.last_status) ? "is-warning" : ""}>{resultLabel(binding.last_status)}</b><time>{dateTime(binding.last_at)}</time></div>{actions(binding)}</div>)}
+    </div> : <div className="ddns-editorial" data-ddns-view="design"><div className="ddns-roster">{visible.map((binding) => <button key={binding.id} className="ddns-roster__item" aria-pressed={selected?.id === binding.id} onClick={() => setSelectedId(binding.id)}><span className="ddns-identity">{identity(binding)}</span><span>{resultLabel(binding.last_status)}</span></button>)}</div>{selected && <article className="ddns-inspector"><header><span className="flow-caption">最近执行</span><h3>{selected.label || selected.domain}</h3><code>{selected.domain}</code></header><dl><div><dt>最近 IP</dt><dd>{selected.last_ip || "未返回"}</dd></div><div><dt>执行结果</dt><dd>{resultLabel(selected.last_status)}</dd></div><div><dt>更新时间</dt><dd>{dateTime(selected.last_at)}</dd></div><div><dt>所属账号</dt><dd>{names.get(selected.account_id) || `账号 ${selected.account_id}`}</dd></div><div><dt>记录类型</dt><dd>{selected.record_type}</dd></div><div><dt>令牌</dt><dd>已保管（不在页面显示）</dd></div></dl>{actions(selected)}</article>}</div>}
     {pages > 1 && <nav className="flow-pagination" aria-label="DDNS 分页"><span>{rows.length} 个绑定 · 每页 10 个</span><button disabled={currentPage <= 1} onClick={() => setPage(currentPage - 1)}>上一页</button><span>{currentPage} / {pages}</span><button disabled={currentPage >= pages} onClick={() => setPage(currentPage + 1)}>下一页</button></nav>}
   </section>;
 }

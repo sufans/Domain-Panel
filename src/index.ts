@@ -5,7 +5,7 @@ import { DatabaseManager, timingSafeEqual, QUOTA_CACHE_KEY } from "./db";
 import type { DBDomain } from "./db";
 import { DNSHEClient, DNSHEApiError } from "./dnshe";
 import type { ApiKeyInfo, CreateDnsRecordParams, DnsRecordInfo, UpdateDnsRecordParams } from "./dnshe";
-import { CloudflareClient, CF_READ_BUDGET_EXHAUSTED, mapZoneToUpstream, zoneIdToNumericId } from "./cloudflare";
+import { CloudflareClient, CloudflareApiError, CfReadError, CF_READ_BUDGET_EXHAUSTED, mapZoneToUpstream, zoneIdToNumericId } from "./cloudflare";
 import type { CfZoneInfo } from "./cloudflare";
 import { collectAccountUsage, createUsageLimiter, CF_FREE_LIMITS } from "./cfusage";
 import { parseCfUsageSnapshot, refreshCfUsageOnce, retainCfUsageOnFailure } from "./cfusage-cache";
@@ -16,7 +16,7 @@ import { computeDnsState } from "./dns-provider";
 import type { DnsState } from "./dns-provider";
 import { toASCII } from "./punycode";
 import "./platforms";
-import { getPlatformAdapter, getPlatformDefinition, listPlatformDefinitions, PlatformError } from "./platforms";
+import { getPlatformAdapter, getPlatformDefinition, listPlatformDefinitions, PlatformError, redactPlatformSecrets } from "./platforms";
 import type { PlatformCapability, PlatformId } from "./platforms";
 
 /**
@@ -31,7 +31,7 @@ function successRes(payload: Record<string, unknown> = {}) {
  * 统一失败响应封装 — 附加 success: false、错误消息与可选错误码 (error_code)
  */
 function errorRes(message: string, errorCode?: string) {
-  const res: Record<string, unknown> = { success: false, message };
+  const res: Record<string, unknown> = { success: false, message: redactPlatformSecrets(message, []) };
   if (errorCode) {
     res.error_code = errorCode;
   }
@@ -694,25 +694,6 @@ app.post("/api/auth/login", async (c) => {
 });
 
 /**
- * 0-d. 登出接口 — 服务端立即使当前 Bearer 会话失效（需已登录，走鉴权中间件）
- */
-app.post("/api/auth/logout", async (c) => {
-  const dbManager = c.get("db");
-  try {
-    const authHeader = c.req.header("Authorization") || "";
-    const token = authHeader.startsWith("Bearer ") ? authHeader.substring(7).trim() : "";
-    if (token) {
-      await dbManager.revokeSession(token);
-      await dbManager.writeLog("info", "auth", "管理员注销了当前登录会话");
-    }
-    return c.json(successRes({ message: "已退出登录" }));
-  } catch (e: any) {
-    console.error("Logout error:", e);
-    return c.json(errorRes(`注销失败: ${e?.message || "服务端内部错误"}`), 500);
-  }
-});
-
-/**
  * 鉴权中间件 — 验证受保护 API 的 Session 会话 Token
  *
  * NOTE: 公开接口（登录 / 初始化 / 状态查询）显式放行；
@@ -771,6 +752,28 @@ app.use("/api/*", async (c, next) => {
   }
 
   return c.json(errorRes("认证失败：会话凭据已失效，请重新登录", "forbidden"), 403);
+});
+
+/**
+ * 0-d. 登出接口 — 服务端立即使当前 Bearer 会话失效（需已登录，走鉴权中间件）
+ *
+ * NOTE: 必须注册在鉴权中间件之后。Hono 按注册顺序执行中间件，
+ *       放在前面会让未认证请求直接拿到成功响应。
+ */
+app.post("/api/auth/logout", async (c) => {
+  const dbManager = c.get("db");
+  try {
+    const authHeader = c.req.header("Authorization") || "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.substring(7).trim() : "";
+    if (token) {
+      await dbManager.revokeSession(token);
+      await dbManager.writeLog("info", "auth", "管理员注销了当前登录会话");
+    }
+    return c.json(successRes({ message: "已退出登录" }));
+  } catch (e: any) {
+    console.error("Logout error:", e);
+    return c.json(errorRes(`注销失败: ${e?.message || "服务端内部错误"}`), 500);
+  }
 });
 
 /**
@@ -1187,7 +1190,7 @@ app.get("/api/unified/domains", async (c) => {
             accountId: account.id,
             alias: account.alias,
             platform: account.provider,
-            message: error instanceof Error ? error.message : "读取平台域名失败"
+            message: platformErrorMessage(error, "读取平台域名失败")
           }
         };
       }
@@ -1227,18 +1230,52 @@ app.post("/api/accounts/:id/check", async (c) => {
 
 type UnifiedRecordBody = { name?: unknown; type?: unknown; content?: unknown; ttl?: unknown; priority?: unknown; line?: unknown };
 
+function unifiedRecordId(value: unknown, label: string): string {
+  const id = typeof value === "number"
+    ? (Number.isSafeInteger(value) && value > 0 ? String(value) : "")
+    : typeof value === "string" ? value.trim() : "";
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)) {
+    throw new PlatformError(`${label} 无效`, 400, "bad_request");
+  }
+  return id;
+}
+
+async function unifiedJsonBody(c: Context): Promise<Record<string, unknown>> {
+  try {
+    const body = await c.req.json();
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("not an object");
+    return body as Record<string, unknown>;
+  } catch {
+    throw new PlatformError("请求体必须是合法的 JSON 对象", 400, "bad_request");
+  }
+}
+
 function unifiedRecordInput(body: UnifiedRecordBody): CreateDnsRecordParams {
   const type = String(body.type || "").trim().toUpperCase();
   const content = String(body.content || "").trim();
-  if (!type || !content) throw new Error("记录类型与记录值均不能为空");
+  const name = String(body.name || "@").trim() || "@";
+  if (!/^[A-Z][A-Z0-9-]{0,15}$/.test(type)) throw new PlatformError("记录类型无效", 400, "invalid_record_type");
+  if (!content) throw new PlatformError("记录值不能为空", 400, "bad_request");
+  if (name.length > 255) throw new PlatformError("主机名长度不能超过 255 个字符", 400, "bad_request");
+  if (content.length > 8192) throw new PlatformError("记录值长度不能超过 8192 个字符", 400, "bad_request");
+  const ttlParam = body.ttl === undefined || body.ttl === null || body.ttl === "" ? 600 : Number(body.ttl);
+  if (!Number.isInteger(ttlParam) || ttlParam <= 0 || ttlParam > 2147483647) {
+    throw new PlatformError("TTL 必须是正整数秒数", 400, "invalid_ttl");
+  }
+  const priorityParam = body.priority === undefined || body.priority === null || body.priority === "" ? undefined : Number(body.priority);
+  if (priorityParam !== undefined && (!Number.isInteger(priorityParam) || priorityParam < 0 || priorityParam > 65535)) {
+    throw new PlatformError("优先级必须是 0 到 65535 的整数", 400, "invalid_priority");
+  }
+  const lineParam = body.line === undefined || body.line === null ? "" : String(body.line).trim();
+  if (lineParam.length > 128) throw new PlatformError("线路名称长度不能超过 128 个字符", 400, "bad_request");
   return {
     subdomain_id: 0,
     type,
-    name: String(body.name || "@").trim() || "@",
+    name,
     content,
-    ttl: Number(body.ttl) > 0 ? Number(body.ttl) : 600,
-    priority: Number.isFinite(Number(body.priority)) ? Number(body.priority) : undefined,
-    line: body.line ? String(body.line) : undefined
+    ttl: ttlParam,
+    priority: priorityParam,
+    line: lineParam || undefined
   };
 }
 
@@ -1253,10 +1290,38 @@ function assertCapability(provider: PlatformId, capability: PlatformCapability):
   }
 }
 
+type PlatformFailureStatus = 400 | 404 | 409 | 429 | 502 | 504;
+
+/**
+ * 统一平台错误出口。
+ *
+ * 上游 401/403 不能原样返回：浏览器的 apiFetch 会把它误判成面板会话失效并清空登录态。
+ * 500+ 一律收敛为 502（超时保留 504），其余未知 4xx 收敛为 400。
+ */
+function platformFailureStatus(status: number): PlatformFailureStatus {
+  if (status === 400 || status === 404 || status === 409 || status === 429) return status;
+  if (status === 504) return 504;
+  if (status >= 500) return 502;
+  return 400;
+}
+
+function platformErrorMessage(error: unknown, fallback: string): string {
+  if (
+    error instanceof PlatformError ||
+    error instanceof DNSHEApiError ||
+    error instanceof CfReadError ||
+    error instanceof CloudflareApiError
+  ) {
+    const message = redactPlatformSecrets(error.message || "", []);
+    if (message) return message;
+  }
+  return fallback;
+}
+
 function platformFailure(c: Context, error: unknown, fallback: string, fallbackCode: string) {
-  const message = error instanceof Error ? error.message : fallback;
+  const message = platformErrorMessage(error, fallback);
   const code = error instanceof PlatformError ? error.code : fallbackCode;
-  const status = (error instanceof PlatformError ? error.status : 502) as 400 | 401 | 403 | 404 | 409 | 429 | 500 | 502;
+  const status = platformFailureStatus(error instanceof PlatformError ? error.status : 502);
   return c.json(errorRes(message, code), status);
 }
 
@@ -1265,8 +1330,8 @@ function unifiedTarget(c: Context): { accountId: number; domainId: string } {
   const accountId = Number(c.req.param("accountId"));
   const domainId = c.req.param("domainId") ?? "";
   if (!Number.isInteger(accountId) || accountId <= 0) throw new PlatformError("账号 ID 无效", 400, "bad_request");
-  if (!domainId) throw new PlatformError("域名 ID 不能为空", 400, "bad_request");
-  return { accountId, domainId };
+  const safeDomainId = unifiedRecordId(domainId, "域名 ID");
+  return { accountId, domainId: safeDomainId };
 }
 
 /**
@@ -1291,7 +1356,7 @@ const unifiedCreateRecord = async (c: Context) => {
   const dbManager = c.get("db");
   try {
     const { accountId, domainId } = unifiedTarget(c);
-    const input = unifiedRecordInput(await c.req.json() as UnifiedRecordBody);
+    const input = unifiedRecordInput(await unifiedJsonBody(c));
     const { auth, adapter } = await unifiedAdapterFor(dbManager, accountId);
     assertCapability(auth.provider, "records.create");
     if (auth.provider === "cloudflare") {
@@ -1310,9 +1375,8 @@ const unifiedUpdateRecord = async (c: Context) => {
   const dbManager = c.get("db");
   try {
     const { accountId, domainId } = unifiedTarget(c);
-    const recordId = c.req.param("recordId");
-    if (!recordId) throw new PlatformError("记录 ID 不能为空", 400, "bad_request");
-    const input = unifiedRecordInput(await c.req.json() as UnifiedRecordBody);
+    const recordId = unifiedRecordId(c.req.param("recordId"), "记录 ID");
+    const input = unifiedRecordInput(await unifiedJsonBody(c));
     const { auth, adapter } = await unifiedAdapterFor(dbManager, accountId);
     assertCapability(auth.provider, "records.update");
     if (auth.provider === "cloudflare") {
@@ -1331,8 +1395,7 @@ const unifiedDeleteRecord = async (c: Context) => {
   const dbManager = c.get("db");
   try {
     const { accountId, domainId } = unifiedTarget(c);
-    const recordId = c.req.param("recordId");
-    if (!recordId) throw new PlatformError("记录 ID 不能为空", 400, "bad_request");
+    const recordId = unifiedRecordId(c.req.param("recordId"), "记录 ID");
     const { auth, adapter } = await unifiedAdapterFor(dbManager, accountId);
     assertCapability(auth.provider, "records.delete");
     await adapter.deleteRecord(auth.credentials, domainId, recordId);
@@ -1345,23 +1408,37 @@ const unifiedDeleteRecord = async (c: Context) => {
 const unifiedBatchRecords = async (c: Context) => {
   const dbManager = c.get("db");
   try {
-    const body = await c.req.json() as { account_id?: unknown; domain_id?: unknown; operation?: unknown; ids?: unknown; value?: unknown };
-    const accountId = Number(body.account_id);
-    const domainId = String(body.domain_id || "");
+    const body = await unifiedJsonBody(c);
     const operation = String(body.operation || "") as "delete" | "status" | "ttl" | "line";
-    const ids = Array.isArray(body.ids) ? body.ids.map(String).filter(Boolean) : [];
-    if (!Number.isInteger(accountId) || accountId <= 0 || !domainId || !["delete", "status", "ttl", "line"].includes(operation) || ids.length === 0 || ids.length > 100) {
-      return c.json(errorRes("批量解析参数无效", "bad_request"), 400);
+    if (!["delete", "status", "ttl", "line"].includes(operation)) {
+      throw new PlatformError("批量解析参数无效", 400, "bad_request");
     }
-    if (operation === "ttl" && !(Number(body.value) > 0)) {
-      return c.json(errorRes("批量修改 TTL 需要正整数秒数", "bad_request"), 400);
+    const accountId = Number(body.account_id);
+    if (!Number.isInteger(accountId) || accountId <= 0 || !Array.isArray(body.ids) || body.ids.length === 0 || body.ids.length > 100) {
+      throw new PlatformError("批量解析参数无效", 400, "bad_request");
+    }
+    const domainId = unifiedRecordId(body.domain_id, "域名 ID");
+    const ids = body.ids.map((id) => unifiedRecordId(id, "记录 ID"));
+    if (new Set(ids).size !== ids.length) {
+      throw new PlatformError("批量解析记录 ID 不能重复", 400, "bad_request");
+    }
+    if (operation === "ttl" && !(Number.isSafeInteger(Number(body.value)) && Number(body.value) > 0 && Number(body.value) <= 2147483647)) {
+      throw new PlatformError("批量修改 TTL 需要正整数秒数", 400, "invalid_ttl");
+    }
+    if (operation === "status" && ![true, false, 0, 1].includes(body.value as boolean | number)) {
+      throw new PlatformError("批量修改状态需要 true/false 或 1/0", 400, "invalid_status");
     }
     if (operation === "line" && !String(body.value || "").trim()) {
-      return c.json(errorRes("批量修改线路需要线路名称", "bad_request"), 400);
+      throw new PlatformError("批量修改线路需要线路名称", 400, "invalid_line");
+    }
+    if (operation === "line" && String(body.value).trim().length > 128) {
+      throw new PlatformError("线路名称长度不能超过 128 个字符", 400, "bad_request");
     }
     const { auth, adapter } = await unifiedAdapterFor(dbManager, accountId);
-    assertCapability(auth.provider, "records.batch");
-    if (!adapter.batchOperation) throw new PlatformError(`${auth.provider} 不支持该批量操作`, 400, "unsupported_batch_operation");
+    const definition = getPlatformDefinition(auth.provider);
+    if (!definition.capabilities.includes("records.batch") || !adapter.batchOperation) {
+      throw new PlatformError(`${definition.name} 不支持批量解析操作`, 400, "unsupported_batch_operation");
+    }
     await adapter.batchOperation(auth.credentials, domainId, operation, ids, body.value as string | number | boolean | undefined);
     return c.json(successRes({ platform: auth.provider, operation, count: ids.length }));
   } catch (error) {
@@ -1417,8 +1494,11 @@ app.get("/api/domains", async (c) => {
     const lastSync = await dbManager.getLastSyncInfo();
     return c.json(successRes({ domains, last_sync: lastSync }));
   } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : "未知错误";
-    return c.json(errorRes(message), 500);
+    if (e instanceof PlatformError || e instanceof DNSHEApiError || e instanceof CfReadError || e instanceof CloudflareApiError) {
+      return platformFailure(c, e, "读取域名列表失败", "domains_read_failed");
+    }
+    console.error("读取域名列表失败:", e);
+    return c.json(errorRes("读取域名列表失败", "domains_read_failed"), 500);
   }
 });
 
@@ -3093,7 +3173,7 @@ app.get("/api/whois/pool", async (c) => {
 /**
  * 公共 DoH 解析器（JSON API），按顺序尝试；三家返回同一 JSON 形状
  *
- * NOTE: 前两家在 Cloudflare 上必通，但自建（Docker）版跑在用户自己的网络里，
+ * NOTE: 前两家在 Cloudflare 上必通，但 Node 自建版跑在用户自己的网络里，
  * 大陆环境下 cloudflare-dns.com 与 dns.google 基本不可用，因此补一个国内可达的
  * 兜底解析器。顺序不变 —— Worker 上第一家就命中，第三家永远不会被访问到。
  */
@@ -3156,7 +3236,7 @@ async function resolveNsViaDoh(name: string): Promise<string[] | null> {
       if (data.Status === 0 || data.Status === 3) return null;
     } catch (e: unknown) {
       // NOTE: 自建版在大陆网络下前两家必然失败（重置或超时），是预期路径而非故障。
-      // 这里只记一行原因，不打整个堆栈，否则 docker compose logs 会被刷得没法看。
+      // 这里只记一行原因，不打整个堆栈，避免服务日志被刷屏。
       const reason = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
       console.error(`DoH NS 查询失败 [${endpoint}] [${name}]: ${reason}`);
     }
@@ -3417,7 +3497,7 @@ app.post("/api/domains/register", async (c) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 以下三组路由属于完整后端版本，静态演示不会请求：
+// 以下三组路由属于完整后端版本，由真实前端按需请求：
 //   1. API 密钥管理      —— 并入自 aloneio/DNSHE-Panel，并补上 Secret 持久化
 //   2. 域名助力          —— 并入自 rabbiecn-bot/dnshe-assist
 //   3. 概览聚合统计      —— 供概览页新卡片使用

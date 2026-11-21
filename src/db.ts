@@ -1165,6 +1165,13 @@ export class DatabaseManager {
   /**
    * 获取所有账户
    */
+  private async maskAccountCredential(row: DBAccount): Promise<DBAccount> {
+    if (row.provider !== "dnsneko" && row.provider !== "gleam") return row;
+    const expectedPrefix = `${row.provider}:`;
+    if (row.api_key.startsWith(expectedPrefix)) return row;
+    return { ...row, api_key: `${expectedPrefix}legacy:${await credentialFingerprint(row.api_key)}` };
+  }
+
   async getAccounts(provider?: AccountProvider): Promise<DBAccount[]> {
     const query = provider
       ? "SELECT id, alias, api_key, provider, created_at FROM accounts WHERE provider = ? ORDER BY id ASC"
@@ -1175,12 +1182,7 @@ export class DatabaseManager {
       : await statement.all<DBAccount>();
     // 旧布局的 DNSNEKO / GLEAM 行把真实密钥放在 api_key 列里，这一列会随接口返回给浏览器，
     // 必须在这里换成不可逆指纹；真实值仍只从加密列读取（见 getPlatformCredentials 的兼容分支）。
-    return Promise.all((results || []).map(async (row) => {
-      if (row.provider !== "dnsneko" && row.provider !== "gleam") return row;
-      const expectedPrefix = `${row.provider}:`;
-      if (row.api_key.startsWith(expectedPrefix)) return row;
-      return { ...row, api_key: `${expectedPrefix}legacy:${await credentialFingerprint(row.api_key)}` };
-    }));
+    return Promise.all((results || []).map((row) => this.maskAccountCredential(row)));
   }
 
   /**
@@ -1271,7 +1273,7 @@ export class DatabaseManager {
     ).bind(id).first<DBAccount>();
 
     await this.writeLog("success", "operation", `账户 [${finalAlias}] 信息已更新`);
-    return result as DBAccount;
+    return this.maskAccountCredential(result as DBAccount);
   }
 
   /**

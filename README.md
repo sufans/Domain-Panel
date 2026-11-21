@@ -2,39 +2,20 @@
 
 > 多平台 DNS 聚合管理面板 —— 统一管理 DNSHE、Cloudflare、DNSNEKO 与 GLEAM 的账号、域名与解析记录。
 
-[![构建自建镜像](https://github.com/shiranzby/DNSHE-Panel/actions/workflows/docker.yml/badge.svg)](https://github.com/shiranzby/DNSHE-Panel/actions/workflows/docker.yml)
 [![许可证: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Domain-Panel 基于 [lioil522/dnshe-manager](https://github.com/lioil522/dnshe-manager) 二次开发。上游已经提供了域名资产看板、Cloudflare 管理、定时同步与续期、通知推送和自建版 Node 适配；本仓库在它之上补齐了概览页指标卡与账户配额、域名注册查重、运行日志、API 密钥集中管理、域名助力与助力记录、**一键委派到 Cloudflare**，并将平台调用重构为代码插件注册机制，统一接入 **DNSHE / Cloudflare / DNSNEKO / GLEAM** 四个平台。同一套后端代码同时支持 **Cloudflare Workers** 与 **Docker 自建** 两种部署形态。
+Domain-Panel 基于 [lioil522/dnshe-manager](https://github.com/lioil522/dnshe-manager) 二次开发。上游已经提供了域名资产看板、Cloudflare 管理、定时同步与续期、通知推送和自建版 Node 适配；本仓库在它之上补齐了概览页指标卡与账户配额、域名注册查重、运行日志、API 密钥集中管理、域名助力与助力记录、**一键委派到 Cloudflare**，并将平台调用重构为代码插件注册机制，统一接入 **DNSHE / Cloudflare / DNSNEKO / GLEAM** 四个平台。生产部署支持 **Cloudflare Workers** 与基于源码的 Node 自建运行方式。
 
 **当前版本：设计、数据、卡片三种平级画风。** 可按页面保存偏好，共享顶栏搜索与业务状态；同时完善资产检查器、注册查重、API 密钥工作面、Cloudflare 逐项读取诊断，并新增独立的自动续期工作页。注册成功后的列表同步和续期结果都保留明确的最终一致性与失败语义，不把旧缓存或未知日期伪装成新成功。
-
-先体验真实前端：[GitHub Pages 三画风演示](https://shiranzby.github.io/DNSHE-Panel/)。Pages 直接构建 `frontend/src`，只把 API 请求替换为合成响应，不连接任何 Worker、数据库、Cookie 或 API Token；源码和自建部署说明仍在本仓库中。
 
 ## 🧭 文档导航
 
 - [功能特性](#功能特性)：三种画风、资产、Cloudflare、查重与运行日志
-- [架构概览](#架构概览)：前端、Worker、Docker 与上游服务的边界
-- [部署方式](#部署方式)：Cloudflare Workers、Wrangler 与 Docker
+- [架构概览](#架构概览)：前端、Worker、Node 自建运行时与上游服务的边界
+- [部署方式](#部署方式)：Cloudflare Workers、Wrangler 与 Node 自建运行
 - [环境变量](#环境变量)：自建版可选配置与密钥备份要求
 - [本地开发](#本地开发)：构建、隔离预览与定向回归
 - [常见问题](#常见问题)：助力缓存、升级回滚、API v1/v2 兼容及读取失败排查
-
----
-
-## 📸 界面参考
-
-以下截图是合成数据参考图，不含真实账号、凭据或用户域名；完整真实前端交互请直接打开上面的 Pages 演示。
-
-设计风概览：
-
-<img src="docs/screenshots/current-overview-design.png" width="880" alt="当前版设计风概览：域名资产、账号配额与右侧信息轨道">
-
-卡片风域名列表：
-
-<img src="docs/screenshots/current-domains-cards.png" width="880" alt="当前版卡片风域名列表：账号分组与域名操作">
-
-> 仓库中的截图均为合成数据，用于说明结构和交互，不代表任何部署实例或真实账号。
 
 ---
 
@@ -84,7 +65,7 @@ Domain-Panel 基于 [lioil522/dnshe-manager](https://github.com/lioil522/dnshe-m
 
 ### 自动化与安全
 
-- **自动续期** — 独立工作页查看续期窗口、到期日期、最近任务与失败语义；定时任务只把可解析且已进入阈值（含已过期）的域名交给上游，缺少到期日期保持未知，成功响应缺少新日期时保留本地旧值。Cloudflare Workers 默认每天 UTC 03:00（北京时间 11:00）运行一轮；Docker 自建版按自身 node 定时器配置运行
+- **自动续期** — 独立工作页查看续期窗口、到期日期、最近任务与失败语义；定时任务只把可解析且已进入阈值（含已过期）的域名交给上游，缺少到期日期保持未知，成功响应缺少新日期时保留本地旧值。Cloudflare Workers 默认每天 UTC 03:00（北京时间 11:00）运行一轮；Node 自建版按自身定时器配置运行
 - **配额感知的同步** — 单次调用受 Workers 免费版「50 个子请求」限制，同步按**域名**预算分批并把剩余部分交回前端续跑，不静默丢账号
 - **通知推送** — 钉钉 / 飞书 / 企业微信 / Server酱 / Telegram / 自定义 Webhook / **邮箱 SMTP**
 - **安全认证** — 用户名 + 密码（PBKDF2 加盐哈希），可选 2FA (TOTP)；AES-GCM 加密存储 API Secret、API 密钥 Secret 与 2FA 密钥
@@ -131,7 +112,7 @@ graph TD
         C1["D1 (SQLite) / Cron Trigger / KV / 静态资源同源发出"]
     end
 
-    subgraph Docker 自建
+    subgraph Node 自建
         C2["node:sqlite 内置 / 进程内定时器 / 同端口同源"]
     end
 
@@ -140,7 +121,7 @@ graph TD
     end
 ```
 
-前端与后端在**同一个 Worker** 里：静态资源由 Cloudflare 直接发出（不进 Worker、不计 Worker 请求数），只有 `/api/*` 才执行脚本。因此没有 Pages 项目、没有第二个域名，也不需要配 CORS。
+前端与后端在**同一个 Worker** 里：静态资源由 Cloudflare 直接发出（不进 Worker、不计 Worker 请求数），只有 `/api/*` 才执行脚本；Node 自建版也由同一进程提供前端和 API，因此不需要配 CORS。
 
 ---
 
@@ -200,8 +181,8 @@ Fork 仓库后配置 Secrets，推送到 `main` 即自动部署。
 不想把 Cloudflare 令牌交给 GitHub Actions 时用这条：
 
 ```bash
-git clone https://github.com/shiranzby/DNSHE-Panel.git
-cd DNSHE-Panel
+git clone https://github.com/sufans/Domain-Panel.git
+cd Domain-Panel
 
 npm install
 npm --prefix frontend install
@@ -225,29 +206,19 @@ openssl rand -hex 32 | npx wrangler secret put AES_KEY
 
 自定义域用 `PUT /accounts/{account_id}/workers/domains` 挂载（Cloudflare 会自动建 `AAAA → 100::` 记录并签发证书），比手工配 A 记录 + Workers 路由少两步。
 
-### 方式三：Docker 自建
+### 方式三：Node 自建运行
 
 ```bash
-curl -O https://raw.githubusercontent.com/shiranzby/DNSHE-Panel/main/docker-compose.yml
-# 可选：需要固定版本、改镜像站或配置密钥时下载 .env.example；已有 .env 不覆盖
-curl -O https://raw.githubusercontent.com/shiranzby/DNSHE-Panel/main/.env.example
-if [ ! -f .env ]; then cp .env.example .env; fi
-docker compose up -d
+git clone https://github.com/sufans/Domain-Panel.git
+cd Domain-Panel
+cp .env.example .env
+npm install
+npm --prefix frontend install
+npm run build:node
+npm --prefix frontend run build:selfhost
+npm run start:node
 # 浏览器打开 http://<服务器IP>:8787，首次进入自行设置管理员用户名与密码
 ```
-
-更新：`docker compose pull && docker compose up -d`
-
-> **⚠️ 大陆网络提示：** `ghcr.io` 拉取可能很慢，可在 `.env` 中设置镜像站：
-> `IMAGE_REPO=ghcr.nju.edu.cn/shiranzby/dnshe-panel`
-> 生产环境建议固定版本而不是 `latest`：
->
-> ```dotenv
-> IMAGE_REPO=ghcr.nju.edu.cn/shiranzby/dnshe-panel
-> IMAGE_TAG=2026.10.18
-> ```
-
-镜像为 `amd64` / `arm64` 多架构；运行时镜像不含 `node_modules`（后端由 esbuild 打包成单文件）；以 uid 1000 非 root 运行；内置 HEALTHCHECK。
 
 ---
 
@@ -265,10 +236,9 @@ docker compose up -d
 | `DEFAULT_API_KEY` | 首次启动自动绑定的 DNSHE API Key | — |
 | `DEFAULT_API_SECRET` | 首次启动自动绑定的 DNSHE API Secret | — |
 | `DEFAULT_API_ALIAS` | 默认账号别名 | — |
-| `IMAGE_TAG` / `IMAGE_REPO` | 自建镜像版本与地址 | `latest` / `ghcr.io/shiranzby/dnshe-panel` |
 | `CRON_UTC_HOUR` / `CRON_UTC_MINUTE` | 自建版定时任务执行时刻（UTC） | `2` / `0`（北京时间 10:00） |
 | `DISABLE_CRON` | 设为 `1` 关闭每日自动同步与续期 | — |
-| `TZ` | 容器内日志时区 | `Asia/Shanghai` |
+| `TZ` | Node 运行时日志时区 | `Asia/Shanghai` |
 
 > **⚠️ 备份提醒：** `AES_KEY` 必须与数据库一起备份。密钥丢失后，库中加密的 API Secret 与 2FA 密钥将无法解密。
 >
@@ -313,19 +283,15 @@ Domain-Panel/
 │   │   ├── rulegen.ts          #   查重规则解析与候选生成
 │   │   ├── wordbanks.ts        #   可编辑词库
 │   │   ├── dnsrecords.ts       #   DNS 记录类型定义
-│   │   ├── demo-api.ts          #   静态演示合成 API（含四平台样本）
 │   │   ├── geodata.ts / zipcodes.ts / pinyin.ts / enwords.ts
 │   │   └── punycode.ts         #   前端侧 Punycode
 │   ├── public/_headers         #   静态资源安全响应头
 │   └── vite.config.ts
 │
 ├── .github/workflows/
-│   ├── docker.yml              #   自建镜像构建与发布（amd64 + arm64）
 │   └── deploy.yml              #   Cloudflare Workers 部署（后端 + 前端静态资源）
 │
 ├── schema.sql                  # 数据库表结构
-├── Dockerfile                  # 三阶段构建（前端 → 后端 → 运行时）
-├── docker-compose.yml
 ├── wrangler.toml               # Cloudflare Workers 配置（含 [assets] 静态资源托管）
 ├── .env.example
 └── package.json
@@ -490,35 +456,25 @@ Cloudflare Workers 免费版对**单次调用**有 50 个子请求的硬上限�
 
 ## ❓ 常见问题
 
-### Docker 提示「未绑定 ASSIST_KV」怎么办？
+### 自建运行提示「未绑定 ASSIST_KV」怎么办？
 
-这是旧版 Docker 镜像在没有 Cloudflare KV binding 时的提示。当前 Docker 自建版不需要额外创建 Cloudflare KV：启动时会自动注入 SQLite-backed `ASSIST_KV`，助力码和相关快照写入挂载的 `/data`，重启后仍可恢复；只有 Cloudflare Workers 部署才使用 `wrangler.toml` 中配置的 `ASSIST_KV` namespace。
+Node 自建运行会自动注入 SQLite-backed `ASSIST_KV`，助力码和相关快照写入 `/data`，重启后仍可恢复；只有 Cloudflare Workers 部署才使用 `wrangler.toml` 中配置的 `ASSIST_KV` namespace。若 `/data` 不可写，请修正数据目录权限后重新启动，并运行 `npm run test:local-kv` 做只读验证。
 
-升级前已经看到过该提示时：
+### 自建运行如何升级、备份与回滚？
 
-1. 拉取当前镜像并重启容器：`docker compose pull && docker compose up -d`；
-2. 确认 `docker-compose.yml` 将宿主机目录挂载到 `/data`，且该目录对容器 uid 1000 可写；
-3. 查看容器日志，并只读检查 `/api/auth/status` 与 `/api/assist/status`；
-4. 在源码目录运行 `npm run test:local-kv`，确认本地适配层回归通过。
-
-如果 `/data` 不可写，缓存无法持久化，重启后会重新出现空状态；不要为 Docker 自建版盲目创建 Cloudflare KV，也不要把「无当日记录」误判成 KV 未绑定。
-
-### Docker 如何升级、备份与回滚？
-
-升级前先备份数据卷，尤其是数据库和 `AES_KEY`。默认 `docker-compose.yml` 使用命名卷 `dnshe-data`，可这样导出到当前目录：
+升级前先备份数据目录，尤其是数据库和 `AES_KEY`：
 
 ```bash
-docker compose down
-docker run --rm -v dnshe-data:/data -v "$PWD:/backup" alpine \
-  tar czf /backup/dnshe-data-$(date +%Y%m%d-%H%M%S).tgz -C /data .
-docker compose pull
-docker compose up -d
-docker compose logs --tail=100 dnshe-panel
+cp -a data "data-backup-$(date +%Y%m%d-%H%M%S)"
+git pull
+npm install
+npm --prefix frontend install
+npm run build:node
+npm --prefix frontend run build:selfhost
+npm run start:node
 ```
 
-如果你把 compose 改成了 `./data:/data` 的宿主机目录挂载，再备份 `./data` 即可；无论哪种方式，都要确保 `/data` 对容器 uid 1000 可写。
-
-升级不会清空 `/data`，也不会自动轮换 `AES_KEY`。如果新版本异常，先保留故障日志，再把 `.env` 的 `IMAGE_TAG` 改回上一版本并重新启动；不要删除数据目录，也不要生成新 AES 密钥覆盖旧值。回滚后同样用 `/api/auth/status` 和 `/api/assist/status` 做只读健康检查。
+升级不会清空 `/data`，也不会自动轮换 `AES_KEY`。如果新版本异常，先保留故障日志，再切换到上一个提交重新构建并启动；不要删除数据目录，也不要生成新 AES 密钥覆盖旧值。回滚后同样用 `/api/auth/status` 和 `/api/assist/status` 做只读健康检查。
 
 ### DNSHE API v1 / v2 如何兼容？
 
@@ -542,12 +498,12 @@ DNSHE 主 API 使用 `X-API-Key` 与 `X-API-Secret`；DDNS 使用记录级 Beare
 
 - 不填写别名时校验 `keys/list`，填写别名时校验 `quota`。请比较相同端点；若只有 `keys/list` 异常而 `quota` 正常，可先填写别名绑定，仍会执行凭据校验。
 - 记录报错时间、HTTP 状态、接口与 Ray ID，向 DNSHE 提供脱敏信息核查；不要公开 Key、Secret、面板会话或未经脱敏的 HAR。
-- 若 Workers 持续失败，可在一台已验证能访问这些接口的主机上使用 [Docker 自建](#方式三docker-自建)。换部署方式不保证上游恢复，应先验证主机出口，保留数据与原 `AES_KEY`。
+- 若 Workers 持续失败，可在一台已验证能访问这些接口的主机上使用 [Node 自建运行](#方式三node-自建运行)。换部署方式不保证上游恢复，应先验证主机出口，保留数据与原 `AES_KEY`。
 - 520 不是让你关闭面板鉴权、反复生成密钥或修改自定义域名 SSL 模式的依据。
 
 完整分析、排查顺序与给部署 AI 的提示见 [issue #3 排查说明](docs/issues/3-account-binding-520.md)。
 
-### Docker 自建版有生产环境鉴权吗？
+### Node 自建版有生产环境鉴权吗？
 
 有。自建版与 Workers 版共用同一套应用层鉴权：首次访问先设置管理员用户名和密码；登录成功后签发服务端 Session Token，除健康检查和登录初始化接口外，受保护的 `/api/*` 请求都必须携带 `Authorization: Bearer <session_token>`。
 
@@ -559,11 +515,11 @@ DNSHE 主 API 使用 `X-API-Key` 与 `X-API-Secret`；DDNS 使用记录级 Beare
 
 如果还需要入口级防护，可在反向代理、VPN 或 Cloudflare Access 上叠加网络层访问控制；这与应用自己的用户名、密码、Session 和 MFA 是两层不同的鉴权。
 
-Docker 默认通过 `http://<服务器IP>:8787` 提供服务，不自动签发 HTTPS 证书、接入 SSO 或限制来源 IP。公开暴露前应在反向代理层配置 HTTPS，并按需要增加 VPN／Cloudflare Access；不要把带有 Session Token 的登录流量长期裸奔在公网 HTTP 上。
+Node 默认通过 `http://<服务器IP>:8787` 提供服务，不自动签发 HTTPS 证书、接入 SSO 或限制来源 IP。公开暴露前应在反向代理层配置 HTTPS，并按需要增加 VPN／Cloudflare Access；不要把带有 Session Token 的登录流量长期裸奔在公网 HTTP 上。
 
 ### Cloudflare 版与自建版有什么区别？
 
-| | Cloudflare Workers | Docker 自建 |
+| | Cloudflare Workers | Node 自建 |
 |---|---|---|
 | 数据库 | D1 (SQLite) | Node 内置 `node:sqlite` |
 | 定时任务 | Cron Trigger | 进程内定时器 |
@@ -601,7 +557,7 @@ DNSHE 不允许自己的号给自家域名助力。在确认弹窗里把那个�
 
 ### 自动续期为什么没有执行？
 
-先在“自动续期”工作页查看到期日期、阈值和最近运行日志。没有可解析到期日期的域名会保持“未知”，不会被猜测为可续期；尚未进入上游免费续期窗口、限流、权限或网络失败会写入对应日志并留给后续任务重试。若上游返回成功但缺少新的到期日期，面板会保留旧日期并记录不完整响应，避免把空值写入数据库。Workers 的默认任务时间是每天 UTC 03:00（北京时间 11:00）；Docker 自建版请以容器日志中的下一次任务时间为准。
+先在“自动续期”工作页查看到期日期、阈值和最近运行日志。没有可解析到期日期的域名会保持“未知”，不会被猜测为可续期；尚未进入上游免费续期窗口、限流、权限或网络失败会写入对应日志并留给后续任务重试。若上游返回成功但缺少新的到期日期，面板会保留旧日期并记录不完整响应，避免把空值写入数据库。Workers 的默认任务时间是每天 UTC 03:00（北京时间 11:00）；Node 自建版请以进程日志中的下一次任务时间为准。
 
 ### 绑定 Cloudflare 账号需要什么权限？
 
@@ -625,7 +581,7 @@ Cloudflare 用 Public Suffix List（PSL）区分「可注册的根域」与「�
 
 ## 🙏 来源与致谢
 
-本项目的整体骨架来自 [lioil522/dnshe-manager](https://github.com/lioil522/dnshe-manager)：Hono 路由、数据层、DNSHE / Cloudflare 客户端、定时同步与续期、通知推送、自建版 Node 适配，以及 Dockerfile 与 CI 工作流。
+本项目的整体骨架来自 [lioil522/dnshe-manager](https://github.com/lioil522/dnshe-manager)：Hono 路由、数据层、DNSHE / Cloudflare 客户端、定时同步与续期、通知推送、自建版 Node 适配，以及 CI 工作流。
 
 多平台聚合能力的 API 参考来源：
 

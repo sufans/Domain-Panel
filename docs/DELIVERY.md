@@ -6,9 +6,7 @@
 
 实网对照：同一账号凭据由本地进程调用 WHOIS/配额成功，经 Workers HKG 路径调用 WHOIS/配额/注册时返回上游 520。指定域名只提交一次注册请求，之后通过独立只读查询确认仍未注册、配额未变。原截图 403 未重现，不能断言其与本次 520 的具体原因相同；报告者的网络问题也没有被宣称已修复。域名、账号与完整实网证据只留在仓库外。
 
-本轮绑定/注册诊断定向回归为 23/23（初版绑定 15 项，新增注册 8 项），Docker 双架构构建包含相同闸门。阶段回归：委派 16/16、预览隔离 9/9、鉴权日志 6/6、续期规则 8/8、SQLite 22/22、local KV 4/4、用量后端 22/22（含本地 workerd）通过；Worker/Node 类型检查、Node 构建和生产前端构建通过。自动化回归的外部 API 均为合成夹具；上一段明确授权的实网注册尝试是独立证据，不能混为自动化测试。未改前端，也未将旧截图当作本轮实网复现证据。
-
-首推 666278e 的 amd64 镜像构建已通过类型、SQLite 和绑定回归，但旧冒烟脚本的 `docker logs | grep -q` 在 `pipefail` 下提前关闭管道，误报无排程日志。已通过本地反例确认并改为完整读取日志；最终镜像交付必须等待后续 run 的双架构与清单全部成功，不能复用前一失败结论。
+本轮绑定/注册诊断定向回归为 23/23（初版绑定 15 项，新增注册 8 项）。阶段回归：委派 16/16、预览隔离 9/9、鉴权日志 6/6、续期规则 8/8、SQLite 22/22、local KV 4/4、用量后端 22/22（含本地 workerd）通过；Worker/Node 类型检查、Node 构建和生产前端构建通过。自动化回归的外部 API 均为合成夹具；上一段明确授权的实网注册尝试是独立证据，不能混为自动化测试。未改前端，也未将旧截图当作本轮实网复现证据。
 
 ## 已发布基线
 
@@ -22,38 +20,15 @@
 
 注册页已加入账号配额选择约束：账号选项内显示已用／剩余或用尽状态，不额外添加规则备注；已用尽账号不可选，未知或读取失败保持独立语义，全部用尽时禁止提交。定向回归为 `npm run test:register-ddns:ui`，包含选择框与注册按钮对齐检查。
 
-本仓库当前交付包含两条彼此隔离的路径：
+本仓库当前交付为**可直接部署的产品源码**：Worker 与 Node 自建版保留完整 API、D1/KV、认证和业务逻辑，部署时使用操作者自己的资源配置。
 
-1. **GitHub Pages 真实前端演示**：由 `frontend/src` 构建，使用 `VITE_STATIC_DEMO=1` 注入合成 API 响应，不连接后端。
-2. **可部署产品源码**：Worker 与 Docker 自建版仍保留完整 API、D1/KV、认证和业务逻辑，部署时使用操作者自己的资源配置。
+## Node 自建版助力缓存
 
-Pages 演示入口：<https://shiranzby.github.io/DNSHE-Panel/>。
-
-## Pages 演示内容
-
-- 真实 React 前端的 13 个 hash 路由：概览、域名列表、Cloudflare、域名助力、账号管理、API 密钥、注册查重、账户配额、动态 DNS、自动续期、CF 用量、运行日志和设置。
-- 设计风、数据风、卡片风三种平级切换。
-- 浅色／深色主题、侧边栏导航、页面切换和键盘可达控件。
-- 所有样本数据均为合成数据；演示不读取 Cookie、Token、本地文件或远程 API。页面组件、CSS、状态和交互来自 `frontend/src`，不是独立重绘页面。
-
-本地查看：
-
-```powershell
-$env:VITE_API_BASE_URL="/"
-$env:VITE_STATIC_DEMO="1"
-npm run build:pages --prefix frontend
-python -m http.server 4173 --directory frontend/dist
-```
-
-然后打开 `http://127.0.0.1:4173/`。
-
-## Docker 助力缓存修复
-
-Docker 自建版此前在没有 Cloudflare KV 时会返回“未绑定 ASSIST_KV”。当前实现提供 SQLite-backed local KV：
+Node 自建版在没有 Cloudflare KV 时使用 SQLite-backed local KV：
 
 - 启动时自动把本地 KV 注入 `ASSIST_KV`；
 - 数据写入自建版 SQLite，并随挂载的 `/data` 目录持久化；
-- 不需要为 Docker 自建版额外创建 Cloudflare KV；
+- 不需要为 Node 自建版额外创建 Cloudflare KV；
 - Cloudflare Workers 仍按自己的 `wrangler.toml` 配置 `ASSIST_KV` namespace。
 
 相关回归：
@@ -66,8 +41,8 @@ npm run verify:node
 
 ## 验收边界
 
-- Pages 构建与后端构建分别验证，不能把真实前端的合成 API 适配器当作已配置的后端实例。
-- 业务写入、登录会话、数据库、KV 和外部凭据不随 Pages 发布。
+- 前端构建与后端构建分别验证；前端产物不含演示会话。
+- 业务写入、登录会话、数据库、KV 和外部凭据只存在于操作者自己的部署。
 - 真实部署前应复制 `.env.example`，创建自己的 D1/KV，注入自己的密钥，并在隔离环境完成读写验证。
 - 前端界面回归使用合成数据；任何真实账号验收都应明确限定为只读并与日用实例隔离。
 
@@ -81,11 +56,8 @@ npm run test:accounts:binding
 npm run test:local-kv
 npm run build:node
 npm run verify:node
-npm run build:selfhost --prefix frontend
-npm run build:pages --prefix frontend
+npm --prefix frontend run build:selfhost
 ```
-
-Pages 工作流安装 `frontend` 依赖，使用 `VITE_STATIC_DEMO=1` 构建真实前端，再上传 `frontend/dist`。
 
 ## 2026-11-10：多平台 DNS 聚合管理（DNSHE / Cloudflare / DNSNEKO / GLEAM）
 
@@ -112,7 +84,6 @@ Pages 工作流安装 `frontend` 依赖，使用 `VITE_STATIC_DEMO=1` 构建真�
  - `EditorialViews.tsx`：四平台账号看板，新平台显示「操作范围」而非「资源快照」。
  - `SourceMappedOverview.tsx`：概览卡片四平台。
  - `App.tsx`：概览身份条、账号页分区、域名页实时资产挂载均支持四平台；后端不可用时 `effectivePlatformDefinitions` 兜底。
- - `demo-api.ts`：四平台样本数据。
 
 ### 安全与兼容
 

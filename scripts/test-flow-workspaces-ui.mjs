@@ -294,13 +294,11 @@ try {
     await page.setViewportSize({ width: 1440, height: 1000 });
     await mode("design");
   });
-  await check("模拟可关闭且不与真实绑定混排", async () => {
-    await page.getByRole("button", { name: "查看模拟预览" }).click();
-    await page.getByText("模拟数据 · 不会写入 DNS", { exact: true }).waitFor();
-    assert.equal(await page.locator(".ddns-actions").count(), 0);
-    assert.equal(await page.locator(".ddns-roster__item").count(), 2);
-    await page.getByRole("button", { name: "关闭模拟预览" }).click();
-    assert.equal(await page.locator(".ddns-roster__item").count(), 10);
+  await check("动态 DNS 仅显示真实绑定", async () => {
+    await page.goto(new URL("/#ddns", base).href, { waitUntil: "networkidle" });
+    assert.equal(await page.getByRole("button", { name: /模拟预览/ }).count(), 0);
+    assert.equal(await page.locator(".ddns-binding-card").count(), 10);
+    assert((await page.locator(".ddns-actions").count()) > 0);
   });
   await goto("logs");
   await check("日志状态色只表达结果且成功保留绿色语义", async () => {

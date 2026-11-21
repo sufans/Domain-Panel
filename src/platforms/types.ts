@@ -92,6 +92,26 @@ export class PlatformError extends Error {
   }
 }
 
+/**
+ * 上游错误正文可能原样回显请求头或凭据，不能直接透传到浏览器。
+ * 同时覆盖已知凭据值和常见的 key/value 形式，避免短字符串匹配污染正文。
+ */
+export function redactPlatformSecrets(message: string, values: Array<string | null | undefined>): string {
+  let redacted = String(message || "");
+  for (const value of values) {
+    const secret = String(value || "").trim();
+    if (secret.length >= 4) redacted = redacted.split(secret).join("[REDACTED]");
+  }
+  return redacted
+    .replace(/\b(api[_-]?key|api[_-]?secret|api[_-]?token|authorization|x-api-key|x-api-secret)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, "$1=[REDACTED]")
+    .slice(0, 1000);
+}
+
+export function safePlatformMessage(error: unknown, fallback: string): string {
+  if (error instanceof PlatformError && error.message.trim()) return redactPlatformSecrets(error.message, []);
+  return fallback;
+}
+
 export function remainingDays(expiresAt?: string | null): number | null {
   if (!expiresAt) return null;
   const timestamp = new Date(expiresAt.replace(" ", "T")).getTime();

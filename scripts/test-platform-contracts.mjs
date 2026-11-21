@@ -59,11 +59,15 @@ async function harness(accounts, upstream, run) {
     return upstream(call);
   };
   const request = async (route, options = {}) => {
+    const hasRawBody = Object.prototype.hasOwnProperty.call(options, "rawBody");
+    const headers = options.auth === false
+      ? { "Content-Type": "application/json" }
+      : { Authorization: `Bearer ${ADMIN_TOKEN}`, "Content-Type": "application/json" };
     const response = await worker.fetch(
       new Request(`https://synthetic.invalid${route}`, {
         method: options.method || "GET",
-        headers: { Authorization: `Bearer ${ADMIN_TOKEN}`, "Content-Type": "application/json" },
-        body: options.body === undefined ? undefined : JSON.stringify(options.body)
+        headers,
+        body: hasRawBody ? options.rawBody : options.body === undefined ? undefined : JSON.stringify(options.body)
       }),
       env,
       { waitUntil(task) { tasks.push(task); }, passThroughOnException() {} }
@@ -205,7 +209,104 @@ await test("GLEAM 不支持批量操作返回稳定错误码", async () => {
       body: { account_id: gleamAccount.id, domain_id: "42", operation: "delete", ids: ["5"] }
     });
     assert.equal(result.status, 400);
-    assert.equal(result.body.error_code, "unsupported_operation");
+    assert.equal(result.body.error_code, "unsupported_batch_operation");
+  });
+});
+
+await test("上游认证失败不会伪装成面板会话失效，也不回显密钥", async () => {
+  await harness([nekoAccount], () => json({
+    code: 403,
+    message: `X-DNSNEKO-API-KEY=${nekoAccount.secret} rejected`
+  }, 403), async ({ request }) => {
+    const checked = await request(`/api/accounts/${nekoAccount.id}/check`, { method: "POST" });
+    assert.equal(checked.status, 400, JSON.stringify(checked.body));
+    assert.equal(checked.body.error_code, "upstream_error");
+    assert.ok(!JSON.stringify(checked.body).includes(nekoAccount.secret));
+    assert.ok(JSON.stringify(checked.body).includes("[REDACTED]"));
+
+    const domains = await request("/api/unified/domains?provider=dnsneko");
+    assert.equal(domains.status, 200, JSON.stringify(domains.body));
+    assert.equal(domains.body.domains.length, 0);
+    assert.ok(!JSON.stringify(domains.body.errors).includes(nekoAccount.secret));
+  });
+});
+
+await test("非法 JSON 与非法记录参数返回 400 且不调用上游", async () => {
+  await harness([nekoAccount], () => json({ code: 200, data: null }), async ({ request, calls }) => {
+    const malformed = await request(`/api/unified/records/${nekoAccount.id}/${NEKO_DOMAIN_ID}`, {
+      method: "POST",
+      rawBody: "{"
+    });
+    assert.equal(malformed.status, 400, JSON.stringify(malformed.body));
+    assert.equal(malformed.body.error_code, "bad_request");
+
+    const badType = await request(`/api/unified/records/${nekoAccount.id}/${NEKO_DOMAIN_ID}`, {
+      method: "POST",
+      body: { name: "@", type: "A;DROP", content: "192.0.2.10" }
+    });
+    assert.equal(badType.status, 400, JSON.stringify(badType.body));
+    assert.equal(badType.body.error_code, "invalid_record_type");
+
+    const badTtl = await request(`/api/unified/records/${nekoAccount.id}/${NEKO_DOMAIN_ID}`, {
+      method: "POST",
+      body: { name: "@", type: "A", content: "192.0.2.10", ttl: 0 }
+    });
+    assert.equal(badTtl.status, 400, JSON.stringify(badTtl.body));
+    assert.equal(badTtl.body.error_code, "invalid_ttl");
+    assert.equal(calls.length, 0);
+  });
+});
+
+await test("非法批量参数返回 400 且不调用上游", async () => {
+  await harness([nekoAccount], () => json({ code: 200, data: null }), async ({ request, calls }) => {
+    const malformed = await request("/api/unified/records/batch", {
+      method: "POST",
+      rawBody: "{"
+    });
+    assert.equal(malformed.status, 400, JSON.stringify(malformed.body));
+    assert.equal(malformed.body.error_code, "bad_request");
+
+    const duplicate = await request("/api/unified/records/batch", {
+      method: "POST",
+      body: {
+        account_id: nekoAccount.id,
+        domain_id: NEKO_DOMAIN_ID,
+        operation: "delete",
+        ids: [NEKO_RECORD_ID, NEKO_RECORD_ID]
+      }
+    });
+    assert.equal(duplicate.status, 400, JSON.stringify(duplicate.body));
+    assert.equal(duplicate.body.error_code, "bad_request");
+
+    const badStatus = await request("/api/unified/records/batch", {
+      method: "POST",
+      body: {
+        account_id: nekoAccount.id,
+        domain_id: NEKO_DOMAIN_ID,
+        operation: "status",
+        ids: [NEKO_RECORD_ID],
+        value: "yes"
+      }
+    });
+    assert.equal(badStatus.status, 400, JSON.stringify(badStatus.body));
+    assert.equal(badStatus.body.error_code, "invalid_status");
+    assert.equal(calls.length, 0);
+  });
+});
+
+await test("旧布局账号仅改别名也不向响应回显明文密钥", async () => {
+  await harness([legacyNekoAccount], () => json({ code: 200, data: null }), async ({ request, sqlite }) => {
+    const result = await request(`/api/accounts/${legacyNekoAccount.id}`, {
+      method: "PUT",
+      body: { alias: "NEKO 旧布局改名" }
+    });
+    assert.equal(result.status, 200, JSON.stringify(result.body));
+    const serialized = JSON.stringify(result.body);
+    assert.ok(!serialized.includes("synthetic-legacy-neko-key"));
+    assert.match(result.body.account.api_key, /^dnsneko:legacy:[0-9a-f]{24}$/);
+
+    const stored = sqlite.prepare("SELECT api_key FROM accounts WHERE id = ?").get(legacyNekoAccount.id);
+    assert.equal(stored.api_key, "synthetic-legacy-neko-key", "旧布局仍需保持可读兼容");
   });
 });
 
@@ -299,12 +400,15 @@ await test("GLEAM 拒绝不支持的记录类型且末调用上游", async () =>
 });
 
 await test("未登录不能调用平台与账号接口", async () => {
-  await harness([], () => json({ code: 200, data: null }), async ({ env }) => {
+  await harness([], () => json({ code: 200, data: null }), async ({ request, env }) => {
     const response = await worker.fetch(new Request("https://synthetic.invalid/api/platforms"), env, {
       waitUntil() {},
       passThroughOnException() {}
     });
     assert.equal(response.status, 401);
+    const logout = await request("/api/auth/logout", { method: "POST", auth: false });
+    assert.equal(logout.status, 401, JSON.stringify(logout.body));
+    assert.equal(logout.body.error_code, "unauthorized");
   });
 });
 

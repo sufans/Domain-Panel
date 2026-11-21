@@ -29,6 +29,14 @@ export class CfReadError extends Error {
   }
 }
 
+/** 已脱敏的 Cloudflare 写请求错误；路由层可安全展示其 message。 */
+export class CloudflareApiError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CloudflareApiError";
+  }
+}
+
 function cfFailureKind(status: number, detail: string, code?: number): CfReadFailureKind {
   // R2 未开通也返回 403，不能因此要求用户反复扩权或替换 Token。
   if (code === 10042 || /please enable R2|R2 (?:is )?not enabled/i.test(detail)) return "not_enabled";
@@ -276,7 +284,7 @@ export class CloudflareClient {
       try {
         data = (await response.json()) as CfResponse<T>;
       } catch {
-        throw new Error(`Cloudflare API 响应异常 (HTTP ${response.status})`);
+        throw new CloudflareApiError(`Cloudflare API 响应异常 (HTTP ${response.status})`);
       }
     }
 
@@ -298,11 +306,11 @@ export class CloudflareClient {
         firstCode === 10000 ||
         /authentication error|invalid bearer|not authorized|missing authorization/i.test(detail);
       if (isAuthError) {
-        throw new Error(
+        throw new CloudflareApiError(
           "Cloudflare API 认证失败：请到 Cloudflare 控制台编辑该账号绑定的 API Token，确认包含 Zone:Read 与 Zone DNS:Edit 权限，且 zone 范围覆盖此域名（Include 指定账号或 All zones），改完无需重新绑定即可重试"
         );
       }
-      throw new Error(`Cloudflare API 错误: ${detail || `HTTP ${response.status}`}`);
+      throw new CloudflareApiError(`Cloudflare API 错误: ${detail || `HTTP ${response.status}`}`);
     }
 
     return data.result as T;
